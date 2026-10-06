@@ -12,6 +12,7 @@
 
 #include <box3d/box3d.h>
 
+#include <godot_cpp/core/object.hpp>
 #include <godot_cpp/templates/local_vector.hpp>
 
 namespace {
@@ -42,6 +43,19 @@ bool should_report(void* p_user_data, const Box3DQueryFilter3D& p_filter, Box3DS
 	return true;
 }
 
+int32_t find_shape_index(const Box3DShapedObjectImpl3D& p_object, b3ShapeId p_shape_id) {
+	for (int32_t i = 0; i < p_object.get_shape_count(); i++) {
+		if (p_object.has_shape_id(i) && B3_ID_EQUALS(p_object.get_shape_id(i), p_shape_id)) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+Object* collider_object(const Box3DShapedObjectImpl3D& p_object) {
+	return ObjectDB::get_instance(ObjectID(p_object.get_instance_id()));
+}
+
 bool overlap_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 	auto* ctx = static_cast<OverlapContext*>(p_context);
 	if (ctx->count >= ctx->max_results) {
@@ -57,7 +71,8 @@ bool overlap_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 	PhysicsServer3DExtensionShapeResult& result = ctx->results[ctx->count];
 	result.rid = object->get_rid();
 	result.collider_id = object->get_instance_id();
-	result.shape = 0;
+	result.collider = collider_object(*object);
+	result.shape = MAX(find_shape_index(*object, p_shape_id), 0);
 	ctx->count++;
 	return true;
 }
@@ -119,13 +134,15 @@ struct RayContext {
 	const Box3DQueryFilter3D* filter = nullptr;
 	bool hit_from_inside = false;
 	bool has_hit = false;
+	bool is_ray = false;
 	b3ShapeId shape_id = b3_nullShapeId;
 	b3Pos point{};
 	b3Vec3 normal{};
 	float fraction = 1.0f;
+	int triangle_index = -1;
 };
 
-float cast_result_fcn(b3ShapeId p_shape_id, b3Pos p_point, b3Vec3 p_normal, float p_fraction, uint64_t, int, int, void* p_context) {
+float cast_result_fcn(b3ShapeId p_shape_id, b3Pos p_point, b3Vec3 p_normal, float p_fraction, uint64_t, int p_triangle_index, int, void* p_context) {
 	auto* ctx = static_cast<RayContext*>(p_context);
 
 	const b3BodyId body_id = b3Shape_GetBody(p_shape_id);
@@ -134,21 +151,19 @@ float cast_result_fcn(b3ShapeId p_shape_id, b3Pos p_point, b3Vec3 p_normal, floa
 		return -1.0f;
 	}
 
+	// Box3D reports a ray that starts inside a solid as a hit at the origin (fraction 0, zero normal).
+	// Godot only reports that when hit_from_inside is set.
+	if (ctx->is_ray && !ctx->hit_from_inside && p_fraction <= 0.0f && b3LengthSquared(p_normal) == 0.0f) {
+		return -1.0f;
+	}
+
 	ctx->has_hit = true;
+	ctx->triangle_index = p_triangle_index;
 	ctx->shape_id = p_shape_id;
 	ctx->point = p_point;
 	ctx->normal = p_normal;
 	ctx->fraction = p_fraction;
 	return p_fraction;
-}
-
-int32_t find_shape_index(const Box3DShapedObjectImpl3D& p_object, b3ShapeId p_shape_id) {
-	for (int32_t i = 0; i < p_object.get_shape_count(); i++) {
-		if (p_object.has_shape_id(i) && B3_ID_EQUALS(p_object.get_shape_id(i), p_shape_id)) {
-			return i;
-		}
-	}
-	return -1;
 }
 
 struct MotionCollisionData {
@@ -371,6 +386,7 @@ bool Box3DPhysicsDirectSpaceState3D::_intersect_ray(
 	RayContext context;
 	context.filter = &filter;
 	context.hit_from_inside = p_hit_from_inside;
+	context.is_ray = true;
 
 	const b3Vec3 origin = godot_to_b3(p_from);
 	const b3Vec3 translation = godot_to_b3(p_to - p_from);
@@ -391,7 +407,9 @@ bool Box3DPhysicsDirectSpaceState3D::_intersect_ray(
 	p_result->normal = b3_to_godot(context.normal);
 	p_result->rid = object->get_rid();
 	p_result->collider_id = object->get_instance_id();
-	p_result->shape = 0;
+	p_result->collider = collider_object(*object);
+	p_result->shape = MAX(find_shape_index(*object, context.shape_id), 0);
+	p_result->face_index = context.triangle_index;
 	return true;
 }
 
@@ -580,7 +598,7 @@ bool Box3DPhysicsDirectSpaceState3D::_rest_info(
 	p_info->normal = b3_to_godot(context.normal);
 	p_info->rid = object->get_rid();
 	p_info->collider_id = object->get_instance_id();
-	p_info->shape = 0;
+	p_info->shape = MAX(find_shape_index(*object, context.shape_id), 0);
 
 	auto* body = dynamic_cast<Box3DBodyImpl3D*>(object);
 	if (body != nullptr) {
