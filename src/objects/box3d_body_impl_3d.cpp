@@ -454,8 +454,9 @@ void Box3DBodyImpl3D::refresh_contacts() {
 				Box3DContactPoint3D contact;
 				contact.local_position = b3_to_godot(self_point);
 				contact.local_normal = normal;
-				// totalNormalImpulse covers every sub-step; normalImpulse is only the last.
-				contact.impulse = normal * (real_t)point.totalNormalImpulse;
+				// The net impulse applied over the whole step in N*s, as Godot reports it. totalNormalImpulse counts
+				// the solve and the relax of each sub-step and the push-out the relax takes back, so it overshoots.
+				contact.impulse = normal * (real_t)point.appliedNormalImpulse;
 				contact.local_velocity = b3_to_godot(b3Body_GetWorldPointVelocity(body_id, self_point));
 				contact.collider_position = b3_to_godot(other_point);
 				contact.local_shape = local_shape;
