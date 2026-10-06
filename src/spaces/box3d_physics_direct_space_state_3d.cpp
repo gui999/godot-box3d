@@ -288,7 +288,7 @@ bool recovery_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 	}
 
 	const b3ShapeType target_type = b3Shape_GetType(p_shape_id);
-	if (target_type == b3_meshShape || target_type == b3_heightShape) {
+	if (target_type == b3_meshShape || target_type == b3_heightShape || target_type == b3_voxelGridShape) {
 		return true;
 	}
 	const b3AABB target_aabb = exact_shape_aabb(p_shape_id);
@@ -503,13 +503,17 @@ bool Box3DPhysicsDirectSpaceState3D::_cast_motion(
 
 	b3World_CastShape(space->get_world_id(), b3Vec3_zero, &shape_proxy.get_proxy(), godot_to_b3(p_motion), filter.filter, cast_result_fcn, &context);
 
+	// Godot (and Jolt) answer a cast that hits nothing with [1, 1]; false means the query failed.
 	if (!context.has_hit) {
 		*p_closest_safe = 1.0;
 		*p_closest_unsafe = 1.0;
-		return false;
+		return true;
 	}
 
-	*p_closest_safe = context.fraction;
+	// The safe fraction stops short of the touch by a couple of millimetres, as Godot brackets it.
+	const float length = (float)p_motion.length();
+	const float back_off = length > 0.0f ? 0.002f / length : 0.0f;
+	*p_closest_safe = MAX(0.0f, context.fraction - back_off);
 	*p_closest_unsafe = context.fraction;
 	return true;
 }
