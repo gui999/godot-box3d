@@ -42,6 +42,8 @@ b3ShapeDef make_shape_def(
 	def.enableSensorEvents = p_is_sensor || !p_is_concave;
 	def.enableContactEvents = !p_is_sensor;
 	def.density = 1.0f;
+	// Terra: the body applies its mass once before the next step (Box3DBodyImpl3D::flush_mass_data).
+	def.updateBodyMass = false;
 	def.baseMaterial = b3DefaultSurfaceMaterial();
 	def.baseMaterial.friction = p_friction;
 	def.baseMaterial.restitution = p_restitution;

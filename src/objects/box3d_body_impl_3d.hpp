@@ -165,6 +165,8 @@ public:
 
 	void post_step();
 
+	void flush_mass_data();
+
 	bool needs_state_sync() const { return state_sync_pending; }
 
 	void set_needs_state_sync(bool p_needed) { state_sync_pending = p_needed; }
@@ -214,6 +216,7 @@ private:
 
 	BodyMode mode = PhysicsServer3D::BODY_MODE_RIGID;
 	bool kinematic_moved = false;
+	bool mass_dirty = false;
 
 	real_t mass = 1.0;
 	Vector3 inertia;

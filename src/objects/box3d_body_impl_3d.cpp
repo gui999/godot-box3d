@@ -83,6 +83,7 @@ void Box3DBodyImpl3D::set_mass(real_t p_mass) {
 }
 
 Vector3 Box3DBodyImpl3D::get_inertia() const {
+	const_cast<Box3DBodyImpl3D*>(this)->flush_mass_data();
 	if (has_body_id()) {
 		const b3Matrix3 tensor = b3Body_GetLocalRotationalInertia(body_id);
 		return Vector3(tensor.cx.x, tensor.cy.y, tensor.cz.z);
@@ -117,7 +118,17 @@ void Box3DBodyImpl3D::apply_mass_from_shapes() {
 	_refresh_mass_data();
 }
 
+// Terra: mass is applied once before the next step (or when read), not once a shape: a body built
+// shape by shape (a falling block of thousands of boxes) otherwise recomputes it thousands of times.
 void Box3DBodyImpl3D::_refresh_mass_data() {
+	mass_dirty = true;
+}
+
+void Box3DBodyImpl3D::flush_mass_data() {
+	if (!mass_dirty) {
+		return;
+	}
+	mass_dirty = false;
 	if (!has_body_id() ||
 			(mode != PhysicsServer3D::BODY_MODE_RIGID && mode != PhysicsServer3D::BODY_MODE_RIGID_LINEAR)) {
 		return;
@@ -479,6 +490,7 @@ void Box3DBodyImpl3D::post_step() {
 }
 
 void Box3DBodyImpl3D::pre_step() {
+	flush_mass_data();
 	if (!has_body_id()) {
 		applied_force = Vector3();
 		applied_torque = Vector3();

@@ -440,6 +440,16 @@ void Box3DPhysicsServer3D::_body_set_space(const RID& p_body, const RID& p_space
 	if (space != nullptr) {
 		space->register_body(body);
 	}
+	// Terra: a body that enters a space gets a new Box3D body, and Box3D dropped the filter joints of
+	// its old one (or never had them, when the exception was added while it was out of a space), so
+	// every exception naming it is joined again.
+	for (Box3DBodyImpl3D* holder : bodies_with_exceptions) {
+		for (KeyValue<RID, Box3DFilterJointImpl3D*>& exception : holder->get_collision_exceptions()) {
+			if (holder == body || exception.key == p_body) {
+				exception.value->rebuild();
+			}
+		}
+	}
 }
 
 RID Box3DPhysicsServer3D::_body_get_space(const RID& p_body) const {
