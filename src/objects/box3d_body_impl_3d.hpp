@@ -68,11 +68,19 @@ public:
 
 	real_t get_bounce() const { return bounce; }
 
-	void set_bounce(real_t p_bounce) { bounce = p_bounce; }
+	void set_bounce(real_t p_bounce);
 
 	real_t get_friction() const { return friction; }
 
-	void set_friction(real_t p_friction) { friction = p_friction; }
+	void set_friction(real_t p_friction);
+
+	PhysicsServer3D::BodyDampMode get_linear_damp_mode() const { return linear_damp_mode; }
+
+	void set_linear_damp_mode(PhysicsServer3D::BodyDampMode p_mode) { linear_damp_mode = p_mode; }
+
+	PhysicsServer3D::BodyDampMode get_angular_damp_mode() const { return angular_damp_mode; }
+
+	void set_angular_damp_mode(PhysicsServer3D::BodyDampMode p_mode) { angular_damp_mode = p_mode; }
 
 	real_t get_angular_damping() const { return angular_damping; }
 
@@ -105,6 +113,8 @@ public:
 	real_t get_sleep_threshold() const { return sleep_threshold; }
 
 	void set_sleep_threshold(real_t p_threshold);
+
+	bool has_custom_sleep_threshold() const { return sleep_threshold_custom; }
 
 	bool is_ccd_enabled() const { return ccd_enabled; }
 
@@ -201,12 +211,16 @@ private:
 	bool use_custom_center_of_mass = false;
 	Vector3 center_of_mass_custom;
 
+	PhysicsServer3D::BodyDampMode linear_damp_mode = PhysicsServer3D::BODY_DAMP_MODE_COMBINE;
+	PhysicsServer3D::BodyDampMode angular_damp_mode = PhysicsServer3D::BODY_DAMP_MODE_COMBINE;
 	real_t linear_damping = 0.0;
 	real_t angular_damping = 0.0;
 	real_t bounce = 0.0;
 	real_t friction = 1.0;
 	real_t gravity_scale = 1.0;
 	real_t sleep_threshold = 0.05f;
+	// False until the body sets its own threshold; until then the space default applies.
+	bool sleep_threshold_custom = false;
 	bool sleep_enabled = true;
 	bool ccd_enabled = false;
 	bool omit_force_integration = false;

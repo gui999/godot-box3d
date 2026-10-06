@@ -39,6 +39,9 @@ public:
 
 	double get_param(PhysicsServer3D::SpaceParameter p_param) const;
 
+	// Default sleep velocity for bodies that did not set their own (SPACE_PARAM_BODY_LINEAR_VELOCITY_SLEEP_THRESHOLD).
+	float get_linear_sleep_threshold() const { return linear_sleep_threshold; }
+
 	void set_param(PhysicsServer3D::SpaceParameter p_param, double p_value);
 
 	Box3DAreaImpl3D* get_default_area() const { return default_area; }
@@ -107,6 +110,7 @@ private:
 	Box3DAreaImpl3D* default_area = nullptr;
 
 	HashSet<Box3DBodyImpl3D*> bodies;
+	float linear_sleep_threshold = 0.05f;
 	HashSet<Box3DAreaImpl3D*> areas;
 
 	LocalVector<PendingAreaEvent> pending_area_events;

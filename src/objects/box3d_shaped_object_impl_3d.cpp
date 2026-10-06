@@ -29,7 +29,8 @@ b3ShapeId create_box3d_shape(
 		bool p_is_sensor,
 		void* p_user_data,
 		float p_friction,
-		float p_restitution) {
+		float p_restitution,
+		bool p_is_static) {
 	Box3DShapeImpl3D* shape = p_instance.get_shape();
 	if (shape == nullptr || p_instance.is_disabled()) {
 		return b3_nullShapeId;
@@ -49,6 +50,9 @@ b3ShapeId create_box3d_shape(
 	def.baseMaterial = b3DefaultSurfaceMaterial();
 	def.baseMaterial.friction = p_friction;
 	def.baseMaterial.restitution = p_restitution;
+	// A static shape need not scan the broad phase when it is created: dynamic bodies find it
+	// when they move, which makes creating many static shapes cheap.
+	def.invokeContactCreation = !p_is_static;
 
 	const Transform3D& local = p_instance.get_transform();
 
@@ -113,7 +117,6 @@ b3ShapeId create_box3d_shape(
 
 		case PhysicsServer3D::SHAPE_CONCAVE_POLYGON: {
 			auto* mesh_shape = static_cast<Box3DConcavePolygonShapeImpl3D*>(shape);
-			def.invokeContactCreation = true;
 
 			// b3CreateMeshShape takes no transform, so an offset or rotated instance needs
 			// its own mesh with the local transform baked into the vertices.
@@ -139,7 +142,6 @@ b3ShapeId create_box3d_shape(
 			if (height_field == nullptr) {
 				return b3_nullShapeId;
 			}
-			def.invokeContactCreation = true;
 			return b3CreateHeightFieldShape(p_body_id, &def, height_field);
 		}
 
@@ -317,6 +319,48 @@ void Box3DShapedObjectImpl3D::set_space(Box3DSpace3D* p_space) {
 	}
 }
 
+void Box3DShapedObjectImpl3D::set_collision_layer(uint32_t p_layer) {
+	if (collision_layer == p_layer) {
+		return;
+	}
+	Box3DObjectImpl3D::set_collision_layer(p_layer);
+	_refresh_shape_filters();
+}
+
+void Box3DShapedObjectImpl3D::set_collision_mask(uint32_t p_mask) {
+	if (collision_mask == p_mask) {
+		return;
+	}
+	Box3DObjectImpl3D::set_collision_mask(p_mask);
+	_refresh_shape_filters();
+}
+
+void Box3DShapedObjectImpl3D::_refresh_shape_filters() {
+	if (!has_body_id()) {
+		return;
+	}
+	const b3Filter filter = godot_to_b3_filter(collision_layer, collision_mask);
+	for (auto& instance : shapes) {
+		if (instance.has_shape_id()) {
+			b3Shape_SetFilter(instance.get_shape_id(), filter, true);
+		}
+	}
+}
+
+void Box3DShapedObjectImpl3D::refresh_shape_materials() {
+	if (!has_body_id()) {
+		return;
+	}
+	const float friction = _get_shape_friction();
+	const float restitution = _get_shape_restitution();
+	for (auto& instance : shapes) {
+		if (instance.has_shape_id()) {
+			b3Shape_SetFriction(instance.get_shape_id(), friction);
+			b3Shape_SetRestitution(instance.get_shape_id(), restitution);
+		}
+	}
+}
+
 void Box3DShapedObjectImpl3D::rebuild_shapes() {
 	if (!has_body_id()) {
 		return;
@@ -343,7 +387,7 @@ void Box3DShapedObjectImpl3D::_create_shape_instance(Box3DShapeInstance3D& p_ins
 	if (p_instance.has_shape_id() || !has_body_id()) {
 		return;
 	}
-	const b3ShapeId shape_id = create_box3d_shape(body_id, p_instance, collision_layer, collision_mask, _is_sensor_body(), &p_instance, _get_shape_friction(), _get_shape_restitution());
+	const b3ShapeId shape_id = create_box3d_shape(body_id, p_instance, collision_layer, collision_mask, _is_sensor_body(), &p_instance, _get_shape_friction(), _get_shape_restitution(), b3Body_GetType(body_id) == b3_staticBody);
 	p_instance.set_shape_id(shape_id);
 }
 

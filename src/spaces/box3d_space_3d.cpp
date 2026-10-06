@@ -50,7 +50,7 @@ double Box3DSpace3D::get_param(PhysicsServer3D::SpaceParameter p_param) const {
 		case PhysicsServer3D::SPACE_PARAM_CONTACT_DEFAULT_BIAS:
 			return 0.0;
 		case PhysicsServer3D::SPACE_PARAM_BODY_LINEAR_VELOCITY_SLEEP_THRESHOLD:
-			return 0.05;
+			return linear_sleep_threshold;
 		case PhysicsServer3D::SPACE_PARAM_BODY_ANGULAR_VELOCITY_SLEEP_THRESHOLD:
 			return 0.05;
 		case PhysicsServer3D::SPACE_PARAM_BODY_TIME_TO_SLEEP:
@@ -67,8 +67,17 @@ void Box3DSpace3D::set_param(PhysicsServer3D::SpaceParameter p_param, double p_v
 		case PhysicsServer3D::SPACE_PARAM_CONTACT_RECYCLE_RADIUS:
 			b3World_SetContactRecycleDistance(world_id, (float)p_value);
 			break;
+		case PhysicsServer3D::SPACE_PARAM_BODY_LINEAR_VELOCITY_SLEEP_THRESHOLD:
+			linear_sleep_threshold = (float)p_value;
+			for (Box3DBodyImpl3D* body : bodies) {
+				if (body->has_body_id() && !body->has_custom_sleep_threshold()) {
+					b3Body_SetSleepThreshold(body->get_body_id(), linear_sleep_threshold);
+				}
+			}
+			break;
 		default:
-			// No direct Box3D equivalent for the remaining space parameters.
+			// Box3D has one per-body sleep velocity (no separate angular value) and a compile-time time to sleep
+			// (B3_TIME_TO_SLEEP); the other space parameters have no equivalent either. space parameters.
 			break;
 	}
 }
@@ -145,8 +154,16 @@ struct AreaPriorityComparator {
 
 Box3DSpace3D::AreaOverrides Box3DSpace3D::compute_area_overrides(Box3DBodyImpl3D* p_body) const {
 	AreaOverrides result;
-	result.linear_damp = p_body->get_linear_damping();
-	result.angular_damp = p_body->get_angular_damping();
+	// Damping from the world side: the default area's value, then overlapping areas on top of it.
+	// A body in REPLACE damp mode ignores all of it and uses only its own value.
+	real_t area_linear_damp = default_area != nullptr ? default_area->get_linear_damp() : 0.0;
+	real_t area_angular_damp = default_area != nullptr ? default_area->get_angular_damp() : 0.0;
+	const auto finish_damp = [&]() {
+		const real_t own_linear = p_body->get_linear_damping();
+		const real_t own_angular = p_body->get_angular_damping();
+		result.linear_damp = p_body->get_linear_damp_mode() == PhysicsServer3D::BODY_DAMP_MODE_REPLACE ? own_linear : own_linear + area_linear_damp;
+		result.angular_damp = p_body->get_angular_damp_mode() == PhysicsServer3D::BODY_DAMP_MODE_REPLACE ? own_angular : own_angular + area_angular_damp;
+	};
 
 	LocalVector<Box3DAreaImpl3D*> overlapping;
 	for (Box3DAreaImpl3D* area : areas) {
@@ -160,6 +177,7 @@ Box3DSpace3D::AreaOverrides Box3DSpace3D::compute_area_overrides(Box3DBodyImpl3D
 		}
 	}
 	if (overlapping.is_empty()) {
+		finish_damp();
 		return result;
 	}
 	overlapping.sort_custom<AreaPriorityComparator>();
@@ -201,18 +219,18 @@ Box3DSpace3D::AreaOverrides Box3DSpace3D::compute_area_overrides(Box3DBodyImpl3D
 			const real_t damp = area->get_linear_damp();
 			switch (linear_mode) {
 				case PhysicsServer3D::AREA_SPACE_OVERRIDE_COMBINE:
-					result.linear_damp += damp;
+					area_linear_damp += damp;
 					break;
 				case PhysicsServer3D::AREA_SPACE_OVERRIDE_COMBINE_REPLACE:
-					result.linear_damp += damp;
+					area_linear_damp += damp;
 					linear_done = true;
 					break;
 				case PhysicsServer3D::AREA_SPACE_OVERRIDE_REPLACE:
-					result.linear_damp = damp;
+					area_linear_damp = damp;
 					linear_done = true;
 					break;
 				case PhysicsServer3D::AREA_SPACE_OVERRIDE_REPLACE_COMBINE:
-					result.linear_damp = damp;
+					area_linear_damp = damp;
 					break;
 				default:
 					break;
@@ -224,18 +242,18 @@ Box3DSpace3D::AreaOverrides Box3DSpace3D::compute_area_overrides(Box3DBodyImpl3D
 			const real_t damp = area->get_angular_damp();
 			switch (angular_mode) {
 				case PhysicsServer3D::AREA_SPACE_OVERRIDE_COMBINE:
-					result.angular_damp += damp;
+					area_angular_damp += damp;
 					break;
 				case PhysicsServer3D::AREA_SPACE_OVERRIDE_COMBINE_REPLACE:
-					result.angular_damp += damp;
+					area_angular_damp += damp;
 					angular_done = true;
 					break;
 				case PhysicsServer3D::AREA_SPACE_OVERRIDE_REPLACE:
-					result.angular_damp = damp;
+					area_angular_damp = damp;
 					angular_done = true;
 					break;
 				case PhysicsServer3D::AREA_SPACE_OVERRIDE_REPLACE_COMBINE:
-					result.angular_damp = damp;
+					area_angular_damp = damp;
 					break;
 				default:
 					break;
@@ -243,6 +261,7 @@ Box3DSpace3D::AreaOverrides Box3DSpace3D::compute_area_overrides(Box3DBodyImpl3D
 		}
 	}
 
+	finish_damp();
 	return result;
 }
 

@@ -1,6 +1,7 @@
 #include "box3d_body_impl_3d.hpp"
 
 #include "../misc/type_conversions.hpp"
+#include "../spaces/box3d_space_3d.hpp"
 #include "box3d_physics_direct_body_state_3d.hpp"
 
 #include <box3d/box3d.h>
@@ -46,7 +47,7 @@ b3BodyId Box3DBodyImpl3D::_create_body_id(b3WorldId p_world_id) {
 	def.linearDamping = omit_force_integration ? 0.0f : (float)linear_damping;
 	def.angularDamping = omit_force_integration ? 0.0f : (float)angular_damping;
 	def.gravityScale = omit_force_integration ? 0.0f : (float)gravity_scale;
-	def.sleepThreshold = (float)sleep_threshold;
+	def.sleepThreshold = sleep_threshold_custom || space == nullptr ? (float)sleep_threshold : space->get_linear_sleep_threshold();
 	def.userData = this;
 	def.enableSleep = sleep_enabled;
 	def.isAwake = true;
@@ -145,6 +146,16 @@ void Box3DBodyImpl3D::_refresh_mass_data() {
 	b3Body_SetMassData(body_id, mass_data);
 }
 
+void Box3DBodyImpl3D::set_bounce(real_t p_bounce) {
+	bounce = p_bounce;
+	refresh_shape_materials();
+}
+
+void Box3DBodyImpl3D::set_friction(real_t p_friction) {
+	friction = p_friction;
+	refresh_shape_materials();
+}
+
 void Box3DBodyImpl3D::set_linear_damping(real_t p_damping) {
 	linear_damping = p_damping;
 	if (has_body_id()) {
@@ -233,6 +244,7 @@ void Box3DBodyImpl3D::set_sleep_enabled(bool p_enabled) {
 
 void Box3DBodyImpl3D::set_sleep_threshold(real_t p_threshold) {
 	sleep_threshold = p_threshold;
+	sleep_threshold_custom = true;
 	if (has_body_id()) {
 		b3Body_SetSleepThreshold(body_id, (float)p_threshold);
 	}

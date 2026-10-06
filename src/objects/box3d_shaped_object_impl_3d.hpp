@@ -56,6 +56,14 @@ public:
 
 	void set_space(Box3DSpace3D* p_space) override;
 
+	// Box3D bakes the filter into each shape, so a layer or mask change has to be pushed to every live shape.
+	void set_collision_layer(uint32_t p_layer) override;
+
+	void set_collision_mask(uint32_t p_mask) override;
+
+	// Pushes the object's current friction and restitution to every live shape.
+	void refresh_shape_materials();
+
 	// Rebuilds every live b3ShapeId for the current body (used after (re)attaching to a
 	// space, and after body type transitions that need shapes recreated).
 	void rebuild_shapes();
@@ -85,6 +93,8 @@ protected:
 	b3BodyId body_id = b3_nullBodyId;
 
 private:
+	void _refresh_shape_filters();
+
 	void _create_shape_instance(Box3DShapeInstance3D& p_instance);
 
 	void _destroy_shape_instance(Box3DShapeInstance3D& p_instance);
