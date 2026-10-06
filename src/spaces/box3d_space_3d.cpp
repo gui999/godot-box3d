@@ -113,6 +113,7 @@ void Box3DSpace3D::step(float p_step) {
 	// Manifold pointers are only valid until the next step, so cache contacts now.
 	for (Box3DBodyImpl3D* body : bodies) {
 		body->refresh_contacts();
+		body->post_step();
 	}
 	const auto t3 = Clock::now();
 

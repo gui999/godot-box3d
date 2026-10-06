@@ -158,6 +158,13 @@ public:
 	// standard force integration is enabled, then clear the transient accumulators.
 	void pre_step();
 
+	// Terra: a kinematic body given a new transform moves there over the next step with the velocity
+	// that takes it there, so what it pushes is pushed (Godot and Jolt semantics), then stops unless
+	// it is moved again.
+	void move_kinematic(const Transform3D& p_transform, float p_step);
+
+	void post_step();
+
 	bool needs_state_sync() const { return state_sync_pending; }
 
 	void set_needs_state_sync(bool p_needed) { state_sync_pending = p_needed; }
@@ -206,6 +213,7 @@ private:
 	void _refresh_mass_data();
 
 	BodyMode mode = PhysicsServer3D::BODY_MODE_RIGID;
+	bool kinematic_moved = false;
 
 	real_t mass = 1.0;
 	Vector3 inertia;

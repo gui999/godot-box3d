@@ -460,6 +460,24 @@ void Box3DBodyImpl3D::refresh_contacts() {
 	}
 }
 
+void Box3DBodyImpl3D::move_kinematic(const Transform3D& p_transform, float p_step) {
+	if (!has_body_id() || mode != PhysicsServer3D::BODY_MODE_KINEMATIC || p_step <= 0.0f) {
+		set_transform(p_transform);
+		return;
+	}
+	const b3Transform t = godot_to_b3_transform(p_transform);
+	b3Body_SetTargetTransform(body_id, b3WorldTransform{ t.p, t.q }, p_step, true);
+	kinematic_moved = true;
+}
+
+void Box3DBodyImpl3D::post_step() {
+	if (kinematic_moved && has_body_id()) {
+		b3Body_SetLinearVelocity(body_id, b3Vec3_zero);
+		b3Body_SetAngularVelocity(body_id, b3Vec3_zero);
+	}
+	kinematic_moved = false;
+}
+
 void Box3DBodyImpl3D::pre_step() {
 	if (!has_body_id()) {
 		applied_force = Vector3();

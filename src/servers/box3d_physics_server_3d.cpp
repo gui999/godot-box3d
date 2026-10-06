@@ -666,7 +666,12 @@ void Box3DPhysicsServer3D::_body_set_state(const RID& p_body, PhysicsServer3D::B
 	ERR_FAIL_NULL(body);
 	switch (p_state) {
 		case PhysicsServer3D::BODY_STATE_TRANSFORM:
-			body->set_transform(p_value);
+			if (body->get_mode() == PhysicsServer3D::BODY_MODE_KINEMATIC && body->get_space() != nullptr) {
+				const float step = body->get_space()->get_last_step();
+				body->move_kinematic(p_value, step > 0.0f ? step : 1.0f / 60.0f);
+			} else {
+				body->set_transform(p_value);
+			}
 			break;
 		case PhysicsServer3D::BODY_STATE_LINEAR_VELOCITY:
 			body->set_linear_velocity(p_value);
