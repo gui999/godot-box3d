@@ -123,8 +123,17 @@ void Box3DSpace3D::step(float p_step) {
 	// The worst step of the last 60 as well, so a spike between two prints is seen.
 	static int diagnostic_steps = 0;
 	static double worst_step_ms = 0.0;
+	static b3Profile worst_profile = {};
+	static int worst_contacts = 0, worst_awake = 0;
 	if (box3d_diagnostics_enabled()) {
-		worst_step_ms = MAX(worst_step_ms, std::chrono::duration<double, std::milli>(t2 - t1).count());
+		const double this_step = std::chrono::duration<double, std::milli>(t2 - t1).count();
+		if (this_step > worst_step_ms) {
+			worst_step_ms = this_step;
+			worst_profile = b3World_GetProfile(world_id);
+			const b3Counters counters = b3World_GetCounters(world_id);
+			worst_contacts = counters.contactCount;
+			worst_awake = counters.awakeContactCount;
+		}
 	}
 	if (box3d_diagnostics_enabled() && ++diagnostic_steps % 60 == 0) {
 		int awake = 0, dynamic = 0;
@@ -142,9 +151,9 @@ void Box3DSpace3D::step(float p_step) {
 		const b3Counters c = b3World_GetCounters(world_id);
 		const b3Profile p = b3World_GetProfile(world_id);
 		auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
-		UtilityFunctions::print(vformat("BOX3D_DIAG step=%d pre=%.2f world_step=%.2f post=%.2f | prof step=%.2f pairs=%.2f collide=%.2f solve=%.2f split=%.2f sleep=%.2f | bodies=%d awake=%d fastest=%.3f islands=%d contacts=%d awake_contacts=%d tasks=%d workers=%d grid_shapes=%d worst_step=%.2f",
+		UtilityFunctions::print(vformat("BOX3D_DIAG step=%d pre=%.2f world_step=%.2f post=%.2f | prof step=%.2f pairs=%.2f collide=%.2f solve=%.2f split=%.2f sleep=%.2f | bodies=%d awake=%d fastest=%.3f islands=%d contacts=%d awake_contacts=%d tasks=%d workers=%d grid_shapes=%d worst_step=%.2f [pairs=%.2f collide=%.2f solve=%.2f contacts=%d awake_contacts=%d]",
 				diagnostic_steps, ms(t1 - t0), ms(t2 - t1), ms(t3 - t2), p.step, p.pairs, p.collide, p.solve, p.splitIslands, p.sleepIslands,
-				dynamic, awake, fastest, c.islandCount, c.contactCount, c.awakeContactCount, c.taskCount, box3d_worker_count(), (int)Box3DVoxelGridShapeImpl3D::get_live_shape_count(), worst_step_ms));
+				dynamic, awake, fastest, c.islandCount, c.contactCount, c.awakeContactCount, c.taskCount, box3d_worker_count(), (int)Box3DVoxelGridShapeImpl3D::get_live_shape_count(), worst_step_ms, worst_profile.pairs, worst_profile.collide, worst_profile.solve, worst_contacts, worst_awake));
 		worst_step_ms = 0.0;
 	}
 
