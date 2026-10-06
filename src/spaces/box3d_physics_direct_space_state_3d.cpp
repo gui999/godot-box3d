@@ -44,12 +44,7 @@ bool should_report(void* p_user_data, const Box3DQueryFilter3D& p_filter, Box3DS
 }
 
 int32_t find_shape_index(const Box3DShapedObjectImpl3D& p_object, b3ShapeId p_shape_id) {
-	for (int32_t i = 0; i < p_object.get_shape_count(); i++) {
-		if (p_object.has_shape_id(i) && B3_ID_EQUALS(p_object.get_shape_id(i), p_shape_id)) {
-			return i;
-		}
-	}
-	return -1;
+	return p_object.find_shape_index(p_shape_id);
 }
 
 Object* collider_object(const Box3DShapedObjectImpl3D& p_object) {

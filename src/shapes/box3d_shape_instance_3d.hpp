@@ -4,10 +4,15 @@
 
 #include <box3d/id.h>
 
+#include <memory>
+
+using namespace godot;
+
 typedef struct b3MeshData b3MeshData;
 
 class Box3DShapeImpl3D;
 class Box3DShapedObjectImpl3D;
+struct Box3DVoxelGridInstance3D;
 
 // Bridges one body/area attachment (an index inside the owning object's LocalVector) to
 // one live b3ShapeId. Needs no separate RID -- it is addressed purely by index inside its
@@ -44,15 +49,21 @@ public:
 
 	uint32_t get_index() const { return index; }
 
-	void set_index(uint32_t p_index) { index = p_index; }
+	void set_index(uint32_t p_index);
 
 	// Set when a trimesh instance needs its local transform baked into its own mesh copy.
 	b3MeshData* get_owned_mesh() const { return owned_mesh; }
 
 	void set_owned_mesh(b3MeshData* p_mesh) { owned_mesh = p_mesh; }
 
+	// A voxel grid instance has no b3ShapeId of its own: its hull shapes live in this shared state.
+	const std::shared_ptr<Box3DVoxelGridInstance3D>& get_grid_instance() const { return grid_instance; }
+
+	void set_grid_instance(std::shared_ptr<Box3DVoxelGridInstance3D> p_grid_instance) { grid_instance = std::move(p_grid_instance); }
+
 private:
 	Box3DShapeImpl3D* shape = nullptr;
+	std::shared_ptr<Box3DVoxelGridInstance3D> grid_instance;
 	Transform3D transform;
 	b3ShapeId shape_id = b3_nullShapeId;
 	b3MeshData* owned_mesh = nullptr;

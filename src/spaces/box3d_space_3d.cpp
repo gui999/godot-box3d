@@ -7,6 +7,7 @@
 #include "../objects/box3d_physics_direct_body_state_3d.hpp"
 #include "../objects/box3d_shaped_object_impl_3d.hpp"
 #include "../servers/box3d_physics_server_3d.hpp"
+#include "../shapes/box3d_voxel_grid_shape_impl_3d.hpp"
 #include "box3d_physics_direct_space_state_3d.hpp"
 
 #include <box3d/box3d.h>
@@ -132,9 +133,9 @@ void Box3DSpace3D::step(float p_step) {
 		const b3Counters c = b3World_GetCounters(world_id);
 		const b3Profile p = b3World_GetProfile(world_id);
 		auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
-		UtilityFunctions::print(vformat("BOX3D_DIAG step=%d pre=%.2f world_step=%.2f post=%.2f | prof step=%.2f pairs=%.2f collide=%.2f solve=%.2f split=%.2f sleep=%.2f | bodies=%d awake=%d fastest=%.3f islands=%d contacts=%d awake_contacts=%d tasks=%d workers=%d",
+		UtilityFunctions::print(vformat("BOX3D_DIAG step=%d pre=%.2f world_step=%.2f post=%.2f | prof step=%.2f pairs=%.2f collide=%.2f solve=%.2f split=%.2f sleep=%.2f | bodies=%d awake=%d fastest=%.3f islands=%d contacts=%d awake_contacts=%d tasks=%d workers=%d grid_shapes=%d",
 				diagnostic_steps, ms(t1 - t0), ms(t2 - t1), ms(t3 - t2), p.step, p.pairs, p.collide, p.solve, p.splitIslands, p.sleepIslands,
-				dynamic, awake, fastest, c.islandCount, c.contactCount, c.awakeContactCount, c.taskCount, box3d_worker_count()));
+				dynamic, awake, fastest, c.islandCount, c.contactCount, c.awakeContactCount, c.taskCount, box3d_worker_count(), (int)Box3DVoxelGridShapeImpl3D::get_live_shape_count()));
 	}
 
 	// Drained only so Box3D's per-step event bookkeeping stays consistent; joint events are unused.

@@ -18,6 +18,7 @@
 #include "../shapes/box3d_heightmap_shape_impl_3d.hpp"
 #include "../shapes/box3d_shape_impl_3d.hpp"
 #include "../shapes/box3d_sphere_shape_impl_3d.hpp"
+#include "../shapes/box3d_voxel_grid_shape_impl_3d.hpp"
 #include "../shapes/box3d_world_boundary_shape_impl_3d.hpp"
 #include "../spaces/box3d_physics_direct_space_state_3d.hpp"
 #include "../spaces/box3d_space_3d.hpp"
@@ -140,7 +141,11 @@ RID Box3DPhysicsServer3D::_heightmap_shape_create() {
 }
 
 RID Box3DPhysicsServer3D::_custom_shape_create() {
-	ERR_FAIL_V_MSG(RID(), "Box3D: custom shapes are not supported.");
+	// The only custom shape is Terra Prime's voxel grid (see Box3DVoxelGridData for its data contract).
+	auto* shape = memnew(Box3DVoxelGridShapeImpl3D);
+	const RID rid = shape_owner.make_rid(shape);
+	shape->set_rid(rid);
+	return rid;
 }
 
 void Box3DPhysicsServer3D::_shape_set_data(const RID& p_shape, const Variant& p_data) {
