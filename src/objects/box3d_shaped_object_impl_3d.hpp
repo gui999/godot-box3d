@@ -67,15 +67,14 @@ public:
 	// Pushes the object's current friction and restitution to every live shape.
 	void refresh_shape_materials();
 
-	// The Godot shape index a live b3 shape belongs to (a voxel grid's hull shapes all map to the grid's
-	// index), or -1.
+	// The Godot shape index a live b3 shape belongs to, or -1.
 	int32_t find_shape_index(b3ShapeId p_shape_id) const;
 
 	// Takes a freed shape off this object: its b3 shapes go and the attachments forget it.
 	void detach_shape(Box3DShapeImpl3D* p_shape);
 
 	// Brings this object's attachments of a voxel grid shape up to date: the given padded cells (a
-	// grid update) or, when null, every cell (new grid data).
+	// grid update, applied in place) or, when null, the whole grid (new grid data).
 	void update_voxel_grid(const Box3DVoxelGridShapeImpl3D* p_grid, const std::vector<int32_t>* p_changed_cells);
 
 	// Rebuilds every live b3ShapeId for the current body (used after (re)attaching to a
@@ -113,17 +112,11 @@ private:
 
 	void _destroy_shape_instance(Box3DShapeInstance3D& p_instance);
 
-	// Voxel grid attachments: one hull per box of every collidable cell, static bodies only.
-	void _create_grid_instance(Box3DShapeInstance3D& p_instance);
+	// A voxel grid attachment is one b3 voxel grid shape holding every collidable cell, static bodies
+	// only. Returns a null id when the grid has no data yet (set_data attaches it then) or cannot be built.
+	b3ShapeId _create_grid_shape(Box3DShapeInstance3D& p_instance);
 
-	void _destroy_grid_instance(Box3DShapeInstance3D& p_instance);
-
-	// Replaces one padded cell's hulls with its module's boxes; returns the bounds of what changed.
-	bool _rebuild_grid_cell(Box3DShapeInstance3D& p_instance, const Box3DVoxelGridShapeImpl3D& p_grid, int32_t p_padded_cell, b3AABB& r_bounds);
-
-	// Static shapes are created without contact creation, so a body resting where a cell appears has
-	// to be woken (destroying a shape already wakes what touched it).
-	void _wake_bodies_in(const b3AABB& p_bounds);
+	static bool _is_grid_instance(const Box3DShapeInstance3D& p_instance);
 
 	void _release_shape_owner(Box3DShapeImpl3D* p_shape);
 

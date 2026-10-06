@@ -10,6 +10,7 @@
 #include "../shapes/box3d_shape_impl_3d.hpp"
 #include "../shapes/box3d_sphere_shape_impl_3d.hpp"
 #include "../shapes/box3d_voxel_grid_shape_impl_3d.hpp"
+#include "../shapes/box3d_voxel_module_cache.hpp"
 #include "../shapes/box3d_world_boundary_shape_impl_3d.hpp"
 #include "../spaces/box3d_space_3d.hpp"
 
@@ -22,9 +23,8 @@
 
 namespace {
 
-// The shape definition every attached shape starts from. No shape carries b3 userData except a voxel
-// grid's cell shapes (see Box3DVoxelGridInstance3D): an instance lives in a LocalVector that can
-// reallocate, so a pointer to it must never be stored.
+// The shape definition every attached shape starts from. No shape carries b3 userData: an instance
+// lives in a LocalVector that can reallocate, so a pointer to it must never be stored.
 b3ShapeDef make_shape_def(
 		uint32_t p_layer,
 		uint32_t p_mask,
@@ -305,7 +305,7 @@ void Box3DShapedObjectImpl3D::set_shape_transform(int32_t p_index, const Transfo
 	ERR_FAIL_INDEX(p_index, (int32_t)shapes.size());
 	Box3DShapeInstance3D& instance = shapes[p_index];
 	instance.set_transform(p_transform);
-	if (instance.has_shape_id() || instance.get_grid_instance()) {
+	if (instance.has_shape_id()) {
 		_destroy_shape_instance(instance);
 		_create_shape_instance(instance);
 		_shapes_changed();
@@ -378,13 +378,6 @@ void Box3DShapedObjectImpl3D::_refresh_shape_filters() {
 		if (instance.has_shape_id()) {
 			b3Shape_SetFilter(instance.get_shape_id(), filter, true);
 		}
-		if (instance.get_grid_instance()) {
-			for (auto& cell : instance.get_grid_instance()->cell_shapes) {
-				for (const b3ShapeId id : cell.second) {
-					b3Shape_SetFilter(id, filter, true);
-				}
-			}
-		}
 	}
 }
 
@@ -398,14 +391,6 @@ void Box3DShapedObjectImpl3D::refresh_shape_materials() {
 		if (instance.has_shape_id()) {
 			b3Shape_SetFriction(instance.get_shape_id(), friction);
 			b3Shape_SetRestitution(instance.get_shape_id(), restitution);
-		}
-		if (instance.get_grid_instance()) {
-			for (auto& cell : instance.get_grid_instance()->cell_shapes) {
-				for (const b3ShapeId id : cell.second) {
-					b3Shape_SetFriction(id, friction);
-					b3Shape_SetRestitution(id, restitution);
-				}
-			}
 		}
 	}
 }
@@ -425,14 +410,11 @@ void Box3DShapedObjectImpl3D::rebuild_shapes() {
 void Box3DShapedObjectImpl3D::_destroy_body_id() {
 	if (has_body_id()) {
 		for (auto& instance : shapes) {
-			instance.set_shape_id(b3_nullShapeId);
-			if (instance.get_grid_instance()) {
+			if (instance.has_shape_id() && _is_grid_instance(instance)) {
 				// The body takes its shapes with it.
-				for (auto& cell : instance.get_grid_instance()->cell_shapes) {
-					Box3DVoxelGridShapeImpl3D::add_live_shapes(-(int64_t)cell.second.size());
-				}
-				instance.set_grid_instance(nullptr);
+				Box3DVoxelGridShapeImpl3D::add_live_shapes(-1);
 			}
+			instance.set_shape_id(b3_nullShapeId);
 		}
 		b3DestroyBody(body_id);
 		body_id = b3_nullBodyId;
@@ -440,14 +422,14 @@ void Box3DShapedObjectImpl3D::_destroy_body_id() {
 }
 
 void Box3DShapedObjectImpl3D::_create_shape_instance(Box3DShapeInstance3D& p_instance) {
-	if (p_instance.has_shape_id() || p_instance.get_grid_instance() || !has_body_id()) {
+	if (p_instance.has_shape_id() || !has_body_id()) {
 		return;
 	}
 	const bool is_static = b3Body_GetType(body_id) == b3_staticBody;
 	// The voxel grid is the only custom shape.
-	if (p_instance.get_shape() != nullptr && !p_instance.is_disabled() && p_instance.get_shape()->get_type() == PhysicsServer3D::SHAPE_CUSTOM) {
+	if (_is_grid_instance(p_instance) && !p_instance.is_disabled()) {
 		ERR_FAIL_COND_MSG(!is_static || _is_sensor_body(), "Box3D: a voxel grid shape can only be added to a static body.");
-		_create_grid_instance(p_instance);
+		p_instance.set_shape_id(_create_grid_shape(p_instance));
 		return;
 	}
 	const b3ShapeId shape_id = create_box3d_shape(body_id, p_instance, collision_layer, collision_mask, _is_sensor_body(), _get_shape_friction(), _get_shape_restitution(), is_static);
@@ -456,10 +438,12 @@ void Box3DShapedObjectImpl3D::_create_shape_instance(Box3DShapeInstance3D& p_ins
 
 void Box3DShapedObjectImpl3D::_destroy_shape_instance(Box3DShapeInstance3D& p_instance) {
 	if (p_instance.has_shape_id()) {
+		if (_is_grid_instance(p_instance)) {
+			Box3DVoxelGridShapeImpl3D::add_live_shapes(-1);
+		}
 		b3DestroyShape(p_instance.get_shape_id(), true);
 		p_instance.set_shape_id(b3_nullShapeId);
 	}
-	_destroy_grid_instance(p_instance);
 	// Box3D keeps a pointer to mesh data, so free the baked copy only after the shape.
 	if (p_instance.get_owned_mesh() != nullptr) {
 		b3DestroyMesh(p_instance.get_owned_mesh());
@@ -485,13 +469,6 @@ int32_t Box3DShapedObjectImpl3D::find_shape_index(b3ShapeId p_shape_id) const {
 			return i;
 		}
 	}
-	// Only a voxel grid's cell shapes carry userData: the stable state of the attachment they belong to.
-	if (b3Shape_IsValid(p_shape_id)) {
-		const auto* grid_instance = static_cast<const Box3DVoxelGridInstance3D*>(b3Shape_GetUserData(p_shape_id));
-		if (grid_instance != nullptr && grid_instance->owner == this) {
-			return (int32_t)grid_instance->index;
-		}
-	}
 	return -1;
 }
 
@@ -506,149 +483,138 @@ void Box3DShapedObjectImpl3D::detach_shape(Box3DShapeImpl3D* p_shape) {
 	_shapes_changed();
 }
 
-void Box3DShapedObjectImpl3D::_create_grid_instance(Box3DShapeInstance3D& p_instance) {
-	auto state = std::make_shared<Box3DVoxelGridInstance3D>();
-	state->owner = this;
-	state->index = p_instance.get_index();
-	p_instance.set_grid_instance(state);
+bool Box3DShapedObjectImpl3D::_is_grid_instance(const Box3DShapeInstance3D& p_instance) {
+	// The voxel grid is the only custom shape.
+	return p_instance.get_shape() != nullptr && p_instance.get_shape()->get_type() == PhysicsServer3D::SHAPE_CUSTOM;
+}
+
+b3ShapeId Box3DShapedObjectImpl3D::_create_grid_shape(Box3DShapeInstance3D& p_instance) {
 	const auto* grid = static_cast<const Box3DVoxelGridShapeImpl3D*>(p_instance.get_shape());
 	const Box3DVoxelGridData& data = grid->get_grid();
 	if (!data.is_valid()) {
-		return; // The grid's data arrives later; set_data updates this attachment then.
-	}
-	// Nothing needs waking: the bodies in the space find the new static shapes as they move.
-	for (int32_t cell = 0; cell < data.get_padded_cell_count(); cell++) {
-		if (data.get_module_at(cell) >= 0 && !data.is_ring_cell(cell)) {
-			b3AABB bounds;
-			_rebuild_grid_cell(p_instance, *grid, cell, bounds);
-		}
-	}
-}
-
-void Box3DShapedObjectImpl3D::_destroy_grid_instance(Box3DShapeInstance3D& p_instance) {
-	const std::shared_ptr<Box3DVoxelGridInstance3D> state = p_instance.get_grid_instance();
-	if (!state) {
-		return;
-	}
-	for (auto& cell : state->cell_shapes) {
-		for (const b3ShapeId id : cell.second) {
-			if (b3Shape_IsValid(id)) {
-				b3DestroyShape(id, false);
-			}
-		}
-		Box3DVoxelGridShapeImpl3D::add_live_shapes(-(int64_t)cell.second.size());
-	}
-	state->cell_shapes.clear();
-	p_instance.set_grid_instance(nullptr);
-}
-
-bool Box3DShapedObjectImpl3D::_rebuild_grid_cell(Box3DShapeInstance3D& p_instance, const Box3DVoxelGridShapeImpl3D& p_grid, int32_t p_padded_cell, b3AABB& r_bounds) {
-	Box3DVoxelGridInstance3D& state = *p_instance.get_grid_instance();
-	bool touched = false;
-	auto include = [&](const b3AABB& p_aabb) {
-		r_bounds = touched ? b3AABB_Union(r_bounds, p_aabb) : p_aabb;
-		touched = true;
-	};
-
-	auto existing = state.cell_shapes.find(p_padded_cell);
-	if (existing != state.cell_shapes.end()) {
-		for (const b3ShapeId id : existing->second) {
-			if (b3Shape_IsValid(id)) {
-				include(b3Shape_GetAABB(id));
-				// A static body has no mass to update; destroying a shape wakes what touched it.
-				b3DestroyShape(id, false);
-			}
-		}
-		Box3DVoxelGridShapeImpl3D::add_live_shapes(-(int64_t)existing->second.size());
-		state.cell_shapes.erase(existing);
+		return b3_nullShapeId; // The grid's data arrives later; set_data updates this attachment then.
 	}
 
-	const Box3DVoxelGridData& data = p_grid.get_grid();
-	if (data.is_ring_cell(p_padded_cell)) {
-		return touched;
-	}
-	const int32_t module = data.get_module_at(p_padded_cell);
-	int box_count = 0;
-	const float* boxes = data.get_module_boxes(module, box_count);
-	if (box_count <= 0) {
-		return touched;
-	}
-
-	int i, j, k;
-	data.get_padded_coordinates(p_padded_cell, i, j, k);
-	const Vector3 corner = data.get_cell_corner(i, j, k);
+	// The grid shape lives in the body's frame: the shape's own transform can only move it.
 	const Transform3D& local = p_instance.get_transform();
-	const Quaternion rotation = local.basis.get_rotation_quaternion();
-	b3Transform box_transform;
-	box_transform.q = godot_to_b3(rotation);
+	ERR_FAIL_COND_V_MSG(!local.basis.is_equal_approx(Basis()), b3_nullShapeId, "Box3D: a voxel grid shape's transform can only translate it, not rotate or scale it.");
 
-	const b3ShapeDef def = make_shape_def(collision_layer, collision_mask, false, false, &state, _get_shape_friction(), _get_shape_restitution(), true);
-	std::vector<b3ShapeId>& created = state.cell_shapes[p_padded_cell];
-	created.reserve((size_t)box_count);
-	for (int b = 0; b < box_count; b++) {
-		const float* box = boxes + (size_t)b * 6;
-		const Vector3 half((box[3] - box[0]) * 0.5f, (box[4] - box[1]) * 0.5f, (box[5] - box[2]) * 0.5f);
-		if (half.x <= 1e-6f || half.y <= 1e-6f || half.z <= 1e-6f) {
-			continue;
+	// A box is named by its cell and its place in the cell's module, in 31 bits.
+	const Vector3i size = data.get_size();
+	const int cell_voxels = data.get_cell_voxels();
+	const int64_t cell_count = (int64_t)size.x * size.y * size.z;
+	int cell_bits = 0;
+	while (((int64_t)1 << cell_bits) < cell_count) {
+		cell_bits++;
+	}
+	int box_bits = 0;
+	while ((1 << box_bits) < cell_voxels * cell_voxels * cell_voxels) {
+		box_bits++;
+	}
+	box_bits = std::min(box_bits, 31 - cell_bits);
+	ERR_FAIL_COND_V_MSG(box_bits < 1, b3_nullShapeId, "Box3D: a voxel grid shape has too many cells.");
+	const int max_boxes_per_cell = 1 << box_bits;
+
+	const int module_count = data.get_module_count();
+	std::vector<b3VoxelGridModule*> modules;
+	modules.reserve((size_t)module_count);
+	bool fits = true;
+	for (int m = 0; m < module_count; m++) {
+		int box_count = 0;
+		const float* boxes = data.get_module_boxes(m, box_count);
+		if (box_count > max_boxes_per_cell) {
+			fits = false;
 		}
-		const Vector3 center = corner + Vector3(box[0] + half.x, box[1] + half.y, box[2] + half.z);
-		box_transform.p = godot_to_b3(local.xform(center));
-		b3BoxHull hull = b3MakeTransformedBoxHull(half.x, half.y, half.z, box_transform);
-		const b3ShapeId id = b3CreateHullShape(body_id, &def, &hull.base);
-		if (B3_IS_NULL(id)) {
-			continue;
+		modules.push_back(Box3DVoxelModuleCache::acquire(boxes, box_count, data.get_cell_size(), cell_voxels));
+	}
+	auto release_modules = [&modules]() {
+		for (b3VoxelGridModule* module : modules) {
+			b3ReleaseVoxelGridModule(module);
 		}
-		created.push_back(id);
-		include(b3Shape_GetAABB(id));
+	};
+	if (!fits) {
+		release_modules();
+		ERR_FAIL_V_MSG(b3_nullShapeId, vformat("Box3D: a voxel grid shape's module has more than %d boxes, the most a cell can hold in a grid of this size.", max_boxes_per_cell));
 	}
-	Box3DVoxelGridShapeImpl3D::add_live_shapes((int64_t)created.size());
-	if (created.empty()) {
-		state.cell_shapes.erase(p_padded_cell);
+
+	b3VoxelGridDef grid_def = {};
+	grid_def.cellCountX = size.x;
+	grid_def.cellCountY = size.y;
+	grid_def.cellCountZ = size.z;
+	grid_def.origin = godot_to_b3(data.get_origin() + local.origin);
+	grid_def.cellMeters = data.get_cell_size();
+	grid_def.cellVoxels = cell_voxels;
+	grid_def.maxBoxesPerCell = max_boxes_per_cell;
+	grid_def.modules = modules.data();
+	grid_def.moduleCount = module_count;
+	grid_def.paddedCells = data.get_padded_cells();
+	b3VoxelGrid* b3_grid = b3CreateVoxelGrid(&grid_def);
+	release_modules();
+	ERR_FAIL_NULL_V_MSG(b3_grid, b3_nullShapeId, "Box3D: could not create the voxel grid.");
+
+	const b3ShapeDef def = make_shape_def(collision_layer, collision_mask, false, false, nullptr, _get_shape_friction(), _get_shape_restitution(), true);
+	const b3ShapeId id = b3CreateVoxelGridShape(body_id, &def, b3_grid);
+	// The shape holds its own reference.
+	b3ReleaseVoxelGrid(b3_grid);
+	if (B3_IS_NON_NULL(id)) {
+		Box3DVoxelGridShapeImpl3D::add_live_shapes(1);
 	}
-	return touched;
-}
-
-namespace {
-
-bool collect_overlapping_shape(b3ShapeId p_shape_id, void* p_context) {
-	static_cast<std::vector<b3BodyId>*>(p_context)->push_back(b3Shape_GetBody(p_shape_id));
-	return true;
-}
-
-} // namespace
-
-void Box3DShapedObjectImpl3D::_wake_bodies_in(const b3AABB& p_bounds) {
-	if (space == nullptr) {
-		return;
-	}
-	std::vector<b3BodyId> bodies;
-	b3World_OverlapAABB(space->get_world_id(), p_bounds, b3DefaultQueryFilter(), collect_overlapping_shape, &bodies);
-	for (const b3BodyId id : bodies) {
-		if (b3Body_IsValid(id) && b3Body_GetType(id) != b3_staticBody) {
-			b3Body_SetAwake(id, true);
-		}
-	}
+	return id;
 }
 
 void Box3DShapedObjectImpl3D::update_voxel_grid(const Box3DVoxelGridShapeImpl3D* p_grid, const std::vector<int32_t>* p_changed_cells) {
 	if (!has_body_id()) {
 		return;
 	}
+	const Box3DVoxelGridData& data = p_grid->get_grid();
+	bool recreated = false;
 	for (auto& instance : shapes) {
-		if (instance.get_shape() != p_grid || !instance.get_grid_instance()) {
+		if (instance.get_shape() != p_grid || instance.is_disabled()) {
 			continue;
 		}
-		if (p_changed_cells == nullptr) {
-			// New grid data: the attachment starts over.
-			_destroy_grid_instance(instance);
-			_create_grid_instance(instance);
+		if (p_changed_cells == nullptr || !instance.has_shape_id()) {
+			// New grid data, or the grid had none yet: the attachment starts over.
+			_destroy_shape_instance(instance);
+			_create_shape_instance(instance);
+			recreated = true;
 			continue;
 		}
-		for (const int32_t cell : *p_changed_cells) {
-			b3AABB bounds;
-			if (_rebuild_grid_cell(instance, *p_grid, cell, bounds)) {
-				_wake_bodies_in(bounds);
+
+		// Cells change in place: the shape keeps its place in the space, its contacts refresh and the bodies
+		// near a changed cell wake. Modules the update appended join the grid's table first, in order, so
+		// a module's index is the same in the data and in the shape.
+		const b3ShapeId id = instance.get_shape_id();
+		bool in_place = true;
+		for (int m = b3VoxelGrid_GetModuleCount(b3Shape_GetVoxelGrid(id)); m < data.get_module_count(); m++) {
+			int box_count = 0;
+			const float* boxes = data.get_module_boxes(m, box_count);
+			b3VoxelGridModule* module = Box3DVoxelModuleCache::acquire(boxes, box_count, data.get_cell_size(), data.get_cell_voxels());
+			const int index = b3Shape_VoxelGridAddModule(id, module);
+			b3ReleaseVoxelGridModule(module);
+			if (index != m) {
+				ERR_PRINT("Box3D: a voxel grid shape's module has more boxes than a cell can hold in a grid of this size.");
+				in_place = false;
+				break;
 			}
 		}
+		if (!in_place) {
+			_destroy_shape_instance(instance);
+			_create_shape_instance(instance);
+			recreated = true;
+			continue;
+		}
+
+		std::vector<int> cells;
+		std::vector<int> cell_modules;
+		cells.reserve(p_changed_cells->size());
+		cell_modules.reserve(p_changed_cells->size());
+		for (const int32_t cell : *p_changed_cells) {
+			cells.push_back(cell);
+			cell_modules.push_back(data.get_module_at(cell));
+		}
+		b3Shape_VoxelGridSetCells(id, cells.data(), cell_modules.data(), (int)cells.size());
+	}
+	if (recreated) {
+		_shapes_changed();
 	}
 }

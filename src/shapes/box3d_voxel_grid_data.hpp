@@ -12,7 +12,7 @@ using namespace godot;
 
 // Terra Prime voxel grid shape data: the parsed, validated form of the Dictionary a game hands to
 // PhysicsServer3D.shape_set_data on a custom shape, independent of how a backend turns it into
-// Box3D shapes (one hull a box today; a native grid shape type could reuse this class unchanged).
+// Box3D shapes (a native voxel grid shape per attachment today; it reuses this class unchanged).
 // The contract is Godot's Jolt voxel grid shape (jolt_voxel_grid_shape_3d.cpp): cell_size, cell_voxels,
 // size, origin, cells (a module index or -1 per cell of the grid padded by a one-cell ring, the ring
 // only for face cover and never collidable), box_offsets, boxes (six floats a box: min xyz, max xyz in
@@ -35,6 +35,14 @@ public:
 	AABB get_aabb() const { return AABB(origin, Vector3(size.x, size.y, size.z) * cell_size); }
 
 	float get_cell_size() const { return cell_size; }
+
+	int get_cell_voxels() const { return cell_voxels; }
+
+	// The module table's size: the modules a grid shape has, the update dictionaries' additions included.
+	int get_module_count() const { return (int)box_offsets.size() - 1; }
+
+	// The padded cells' module indices, get_padded_cell_count() of them, in the layout of get_padded_index.
+	const int32_t* get_padded_cells() const { return padded_cells.data(); }
 
 	Vector3i get_size() const { return size; }
 
