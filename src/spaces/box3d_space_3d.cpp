@@ -11,6 +11,9 @@
 
 #include <box3d/box3d.h>
 
+#include <chrono>
+#include <godot_cpp/variant/utility_functions.hpp>
+
 namespace {
 constexpr int SUB_STEP_COUNT = 4;
 } // namespace
@@ -76,6 +79,9 @@ void Box3DSpace3D::set_default_area(Box3DAreaImpl3D* p_area) {
 
 void Box3DSpace3D::step(float p_step) {
 	last_step = p_step;
+	// TERRA DIAGNOSTICS: per-phase wall time and sleep state, printed once a second.
+	using Clock = std::chrono::steady_clock;
+	const auto t0 = Clock::now();
 
 	if (default_area != nullptr) {
 		b3World_SetGravity(world_id, godot_to_b3(default_area->compute_gravity(Vector3())));
@@ -86,8 +92,10 @@ void Box3DSpace3D::step(float p_step) {
 	for (Box3DBodyImpl3D* body : bodies) {
 		body->pre_step();
 	}
+	const auto t1 = Clock::now();
 
 	b3World_Step(world_id, p_step, SUB_STEP_COUNT);
+	const auto t2 = Clock::now();
 
 	_pull_body_events();
 	_pull_sensor_events();
@@ -95,6 +103,29 @@ void Box3DSpace3D::step(float p_step) {
 	// Manifold pointers are only valid until the next step, so cache contacts now.
 	for (Box3DBodyImpl3D* body : bodies) {
 		body->refresh_contacts();
+	}
+	const auto t3 = Clock::now();
+
+	static int diagnostic_steps = 0;
+	if (box3d_diagnostics_enabled() && ++diagnostic_steps % 60 == 0) {
+		int awake = 0, dynamic = 0;
+		float fastest = 0.0f;
+		for (Box3DBodyImpl3D* body : bodies) {
+			if (!body->has_body_id() || b3Body_GetType(body->get_body_id()) != b3_dynamicBody) {
+				continue;
+			}
+			dynamic++;
+			if (b3Body_IsAwake(body->get_body_id())) {
+				awake++;
+				fastest = MAX(fastest, b3Length(b3Body_GetLinearVelocity(body->get_body_id())));
+			}
+		}
+		const b3Counters c = b3World_GetCounters(world_id);
+		const b3Profile p = b3World_GetProfile(world_id);
+		auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+		UtilityFunctions::print(vformat("BOX3D_DIAG step=%d pre=%.2f world_step=%.2f post=%.2f | prof step=%.2f pairs=%.2f collide=%.2f solve=%.2f split=%.2f sleep=%.2f | bodies=%d awake=%d fastest=%.3f islands=%d contacts=%d awake_contacts=%d tasks=%d workers=%d",
+				diagnostic_steps, ms(t1 - t0), ms(t2 - t1), ms(t3 - t2), p.step, p.pairs, p.collide, p.solve, p.splitIslands, p.sleepIslands,
+				dynamic, awake, fastest, c.islandCount, c.contactCount, c.awakeContactCount, c.taskCount, box3d_worker_count()));
 	}
 
 	// Drained only so Box3D's per-step event bookkeeping stays consistent; joint events are unused.

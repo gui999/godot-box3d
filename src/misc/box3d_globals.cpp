@@ -13,6 +13,7 @@ using namespace godot;
 
 namespace {
 const char *WORKER_COUNT_SETTING = "physics/box3d/worker_count";
+const char *DIAGNOSTICS_SETTING = "physics/box3d/diagnostics";
 } // namespace
 
 void box3d_initialize() {
@@ -29,6 +30,15 @@ void box3d_initialize() {
 	info["hint"] = PROPERTY_HINT_RANGE;
 	info["hint_string"] = "0,32,1";
 	settings->add_property_info(info);
+
+	if (!settings->has_setting(DIAGNOSTICS_SETTING)) {
+		settings->set_setting(DIAGNOSTICS_SETTING, false);
+	}
+	settings->set_initial_value(DIAGNOSTICS_SETTING, false);
+	Dictionary diagnostics_info;
+	diagnostics_info["name"] = DIAGNOSTICS_SETTING;
+	diagnostics_info["type"] = Variant::BOOL;
+	settings->add_property_info(diagnostics_info);
 }
 
 void box3d_deinitialize() {
@@ -42,4 +52,9 @@ int box3d_worker_count() {
 		return setting > 0 ? std::clamp(setting, 1, B3_MAX_WORKERS) : box3d_default_worker_count();
 	}();
 	return count;
+}
+
+bool box3d_diagnostics_enabled() {
+	static const bool enabled = (bool)ProjectSettings::get_singleton()->get_setting_with_override(DIAGNOSTICS_SETTING);
+	return enabled;
 }
