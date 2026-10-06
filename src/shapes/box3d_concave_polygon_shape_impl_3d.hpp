@@ -4,6 +4,8 @@
 
 #include <godot_cpp/templates/local_vector.hpp>
 
+#include <mutex>
+
 #include <box3d/types.h>
 
 // ConcavePolygonShape3D -> a b3MeshData* built via b3CreateMesh() and shared by every
@@ -25,7 +27,9 @@ public:
 	// Returns the shared mesh; the shape holds a *reference* to this per Box3D's docs, so
 	// callers must keep this Box3DConcavePolygonShapeImpl3D alive for as long as any
 	// b3ShapeId built from it exists.
-	const b3MeshData* get_mesh() const { return mesh; }
+	// Built lazily on first call and cached; safe to call from any thread (internal mutex).
+	// The pointer stays valid until set_data() or destruction, which are main-thread only.
+	const b3MeshData* get_mesh() const;
 
 	const PackedVector3Array& get_faces() const { return faces; }
 
@@ -33,9 +37,10 @@ public:
 	static b3MeshData* build_mesh(const PackedVector3Array& p_faces, const Transform3D& p_transform);
 
 private:
-	void _rebuild_mesh();
+	mutable std::mutex mesh_mutex;
+	mutable bool mesh_built = false;
 
 	PackedVector3Array faces;
-	b3MeshData* mesh = nullptr;
+	mutable b3MeshData* mesh = nullptr;
 	AABB aabb;
 };

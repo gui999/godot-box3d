@@ -274,7 +274,7 @@ private:
 	RID_PtrOwner<Box3DSpace3D> space_owner;
 	RID_PtrOwner<Box3DBodyImpl3D> body_owner;
 	RID_PtrOwner<Box3DAreaImpl3D> area_owner;
-	RID_PtrOwner<Box3DShapeImpl3D> shape_owner;
+	RID_PtrOwner<Box3DShapeImpl3D, true> shape_owner;
 	RID_PtrOwner<Box3DJointImpl3D> joint_owner;
 
 	HashSet<Box3DSpace3D*> active_spaces;

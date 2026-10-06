@@ -1,5 +1,7 @@
 #include "box3d_physics_direct_space_state_3d.hpp"
 
+#include "../shapes/box3d_concave_polygon_shape_impl_3d.hpp"
+
 #include "../misc/box3d_shape_proxy.hpp"
 #include "../misc/type_conversions.hpp"
 #include "../objects/box3d_area_impl_3d.hpp"
@@ -503,6 +505,14 @@ int32_t Box3DPhysicsDirectSpaceState3D::_intersect_shape(
 
 	Box3DShapeImpl3D* shape = Box3DPhysicsServer3D::get_singleton()->get_shape(p_shape_rid);
 	ERR_FAIL_NULL_V(shape, 0);
+
+	// A concave query shape has no overlap proxy, but querying with it is how a worker thread asks
+	// for its Box3D mesh to be prebuilt (so attaching it to a body later is cheap). Build and return;
+	// this touches only the shape's own mutex-guarded cache, no world or server state.
+	if (shape->get_type() == PhysicsServer3D::SHAPE_CONCAVE_POLYGON) {
+		static_cast<Box3DConcavePolygonShapeImpl3D*>(shape)->get_mesh();
+		return 0;
+	}
 
 	const Box3DShapeProxy3D shape_proxy(shape, p_transform);
 	if (!shape_proxy.is_supported()) {

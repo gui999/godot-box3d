@@ -5,6 +5,7 @@
 #include <box3d/collision.h>
 
 Box3DConcavePolygonShapeImpl3D::~Box3DConcavePolygonShapeImpl3D() {
+	std::lock_guard<std::mutex> lock(mesh_mutex);
 	if (mesh != nullptr) {
 		b3DestroyMesh(mesh);
 		mesh = nullptr;
@@ -27,7 +28,34 @@ void Box3DConcavePolygonShapeImpl3D::set_data(const Variant& p_data) {
 		ERR_FAIL_COND(p_data.get_type() != Variant::PACKED_VECTOR3_ARRAY);
 		faces = p_data;
 	}
-	_rebuild_mesh();
+	// Only the bounds are computed here; the Box3D mesh (BVH) is built lazily by get_mesh(), so a
+	// worker thread can prebuild it (see Box3DPhysicsDirectSpaceState3D::_intersect_shape).
+	std::lock_guard<std::mutex> lock(mesh_mutex);
+	if (mesh != nullptr) {
+		b3DestroyMesh(mesh);
+		mesh = nullptr;
+	}
+	mesh_built = false;
+	const int face_count = faces.size();
+	if (face_count < 3 || face_count % 3 != 0) {
+		return;
+	}
+	Vector3 min_point = faces[0];
+	Vector3 max_point = faces[0];
+	for (int i = 0; i < face_count; i++) {
+		min_point = min_point.min(faces[i]);
+		max_point = max_point.max(faces[i]);
+	}
+	aabb = AABB(min_point, max_point - min_point);
+}
+
+const b3MeshData* Box3DConcavePolygonShapeImpl3D::get_mesh() const {
+	std::lock_guard<std::mutex> lock(mesh_mutex);
+	if (!mesh_built) {
+		mesh = build_mesh(faces, Transform3D());
+		mesh_built = true;
+	}
+	return mesh;
 }
 
 b3MeshData* Box3DConcavePolygonShapeImpl3D::build_mesh(
@@ -70,26 +98,4 @@ b3MeshData* Box3DConcavePolygonShapeImpl3D::build_mesh(
 	def.identifyEdges = false;
 
 	return b3CreateMesh(&def, nullptr, 0);
-}
-
-void Box3DConcavePolygonShapeImpl3D::_rebuild_mesh() {
-	if (mesh != nullptr) {
-		b3DestroyMesh(mesh);
-		mesh = nullptr;
-	}
-
-	const int face_count = faces.size();
-	if (face_count < 3 || face_count % 3 != 0) {
-		return;
-	}
-
-	Vector3 min_point = faces[0];
-	Vector3 max_point = faces[0];
-	for (int i = 0; i < face_count; i++) {
-		min_point = min_point.min(faces[i]);
-		max_point = max_point.max(faces[i]);
-	}
-
-	aabb = AABB(min_point, max_point - min_point);
-	mesh = build_mesh(faces, Transform3D());
 }
