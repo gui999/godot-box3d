@@ -112,9 +112,9 @@ private:
 
 	void _destroy_shape_instance(Box3DShapeInstance3D& p_instance);
 
-	// A voxel grid attachment is one b3 voxel grid shape holding every collidable cell, static bodies
-	// only. Returns a null id when the grid has no data yet (set_data attaches it then) or cannot be built.
-	b3ShapeId _create_grid_shape(Box3DShapeInstance3D& p_instance);
+	// A voxel grid attachment is one b3 voxel grid shape holding every collidable cell, on a static, kinematic or
+	// rigid body. Returns a null id when the grid has no data yet (set_data attaches it then) or cannot be built.
+	b3ShapeId _create_grid_shape(Box3DShapeInstance3D& p_instance, bool p_is_static);
 
 	static bool _is_grid_instance(const Box3DShapeInstance3D& p_instance);
 

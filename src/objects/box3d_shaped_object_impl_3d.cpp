@@ -428,8 +428,9 @@ void Box3DShapedObjectImpl3D::_create_shape_instance(Box3DShapeInstance3D& p_ins
 	const bool is_static = b3Body_GetType(body_id) == b3_staticBody;
 	// The voxel grid is the only custom shape.
 	if (_is_grid_instance(p_instance) && !p_instance.is_disabled()) {
-		ERR_FAIL_COND_MSG(!is_static || _is_sensor_body(), "Box3D: a voxel grid shape can only be added to a static body.");
-		p_instance.set_shape_id(_create_grid_shape(p_instance));
+		// Static, kinematic and rigid bodies carry grids (a shard is a grid on a rigid body); a sensor does not.
+		ERR_FAIL_COND_MSG(_is_sensor_body(), "Box3D: a voxel grid shape can not be added to an area or a sensor.");
+		p_instance.set_shape_id(_create_grid_shape(p_instance, is_static));
 		return;
 	}
 	const b3ShapeId shape_id = create_box3d_shape(body_id, p_instance, collision_layer, collision_mask, _is_sensor_body(), _get_shape_friction(), _get_shape_restitution(), is_static);
@@ -488,7 +489,7 @@ bool Box3DShapedObjectImpl3D::_is_grid_instance(const Box3DShapeInstance3D& p_in
 	return p_instance.get_shape() != nullptr && p_instance.get_shape()->get_type() == PhysicsServer3D::SHAPE_CUSTOM;
 }
 
-b3ShapeId Box3DShapedObjectImpl3D::_create_grid_shape(Box3DShapeInstance3D& p_instance) {
+b3ShapeId Box3DShapedObjectImpl3D::_create_grid_shape(Box3DShapeInstance3D& p_instance, bool p_is_static) {
 	const auto* grid = static_cast<const Box3DVoxelGridShapeImpl3D*>(p_instance.get_shape());
 	const Box3DVoxelGridData& data = grid->get_grid();
 	if (!data.is_valid()) {
@@ -552,7 +553,7 @@ b3ShapeId Box3DShapedObjectImpl3D::_create_grid_shape(Box3DShapeInstance3D& p_in
 	release_modules();
 	ERR_FAIL_NULL_V_MSG(b3_grid, b3_nullShapeId, "Box3D: could not create the voxel grid.");
 
-	const b3ShapeDef def = make_shape_def(collision_layer, collision_mask, false, false, nullptr, _get_shape_friction(), _get_shape_restitution(), true);
+	const b3ShapeDef def = make_shape_def(collision_layer, collision_mask, false, false, nullptr, _get_shape_friction(), _get_shape_restitution(), p_is_static);
 	const b3ShapeId id = b3CreateVoxelGridShape(body_id, &def, b3_grid);
 	// The shape holds its own reference.
 	b3ReleaseVoxelGrid(b3_grid);
@@ -568,6 +569,7 @@ void Box3DShapedObjectImpl3D::update_voxel_grid(const Box3DVoxelGridShapeImpl3D*
 	}
 	const Box3DVoxelGridData& data = p_grid->get_grid();
 	bool recreated = false;
+	bool edited = false;
 	for (auto& instance : shapes) {
 		if (instance.get_shape() != p_grid || instance.is_disabled()) {
 			continue;
@@ -613,8 +615,10 @@ void Box3DShapedObjectImpl3D::update_voxel_grid(const Box3DVoxelGridShapeImpl3D*
 			cell_modules.push_back(data.get_module_at(cell));
 		}
 		b3Shape_VoxelGridSetCells(id, cells.data(), cell_modules.data(), (int)cells.size());
+		// On a rigid body Box3D recomputed the mass of the boxes that are left: the body applies its own mass again.
+		edited = true;
 	}
-	if (recreated) {
+	if (recreated || edited) {
 		_shapes_changed();
 	}
 }
