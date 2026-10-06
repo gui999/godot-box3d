@@ -47,8 +47,11 @@ int32_t find_shape_index(const Box3DShapedObjectImpl3D& p_object, b3ShapeId p_sh
 	return p_object.find_shape_index(p_shape_id);
 }
 
+// The result structs are read by the engine, so they take the engine's own object pointer, not
+// godot-cpp's wrapper (which ObjectDB::get_instance returns here).
 Object* collider_object(const Box3DShapedObjectImpl3D& p_object) {
-	return ObjectDB::get_instance(ObjectID(p_object.get_instance_id()));
+	const uint64_t id = p_object.get_instance_id();
+	return id == 0 ? nullptr : reinterpret_cast<Object*>(internal::gdextension_interface_object_get_instance_from_id(id));
 }
 
 bool overlap_result_fcn(b3ShapeId p_shape_id, void* p_context) {
