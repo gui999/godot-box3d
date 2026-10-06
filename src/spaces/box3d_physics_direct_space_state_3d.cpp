@@ -272,12 +272,58 @@ b3AABB exact_shape_aabb(b3ShapeId p_shape_id) {
 struct RecoveryContext {
 	const Box3DQueryFilter3D* filter = nullptr;
 	b3AABB query_aabb{};
+	const b3ShapeProxy* proxy = nullptr;
 	Vector3 preferred_motion;
 	Vector3* accumulated_push = nullptr;
 	int32_t* push_count = nullptr;
 	int32_t local_shape = -1;
 	LocalVector<MotionCollisionData>* collisions = nullptr;
 };
+
+// A voxel grid answers its own recovery: the push out of each box leaves through an exposed face only, so a body across a
+// seam between two boxes is pushed out of the surface and never sideways into the seam.
+void recover_from_voxel_grid(RecoveryContext& p_context, b3ShapeId p_shape_id, b3BodyId p_body_id, Box3DShapedObjectImpl3D* p_object) {
+	const b3WorldTransform body_transform = b3Body_GetTransform(p_body_id);
+	b3Vec3 pushes[3];
+	const int box_count = b3RecoverVoxelGrid(
+			b3Shape_GetVoxelGrid(p_shape_id),
+			b3Transform{ body_transform.p, body_transform.q },
+			p_context.proxy,
+			pushes);
+	if (box_count == 0) {
+		return;
+	}
+
+	const b3Vec3 query_center = b3MulSV(0.5f, b3Add(p_context.query_aabb.lowerBound, p_context.query_aabb.upperBound));
+	bool pushed = false;
+	for (int32_t i = 0; i < 3; i++) {
+		const Vector3 push = b3_to_godot(pushes[i]);
+		const real_t depth = push.length();
+		if (depth <= CMP_EPSILON) {
+			continue;
+		}
+		const Vector3 normal = push / depth;
+		const Vector3 slopped_push = normal * (depth + B3_LINEAR_SLOP);
+		for (int32_t axis = 0; axis < 3; axis++) {
+			if (Math::abs(slopped_push[axis]) > Math::abs((*p_context.accumulated_push)[axis])) {
+				(*p_context.accumulated_push)[axis] = slopped_push[axis];
+			}
+		}
+		pushed = true;
+
+		MotionCollisionData collision;
+		collision.object = p_object;
+		collision.position = b3_to_godot(b3Shape_GetClosestPoint(p_shape_id, query_center));
+		collision.normal = normal;
+		collision.depth = depth;
+		collision.local_shape = p_context.local_shape;
+		collision.collider_shape = find_shape_index(*p_object, p_shape_id);
+		append_motion_collision(*p_context.collisions, collision);
+	}
+	if (pushed) {
+		(*p_context.push_count)++;
+	}
+}
 
 bool recovery_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 	auto* ctx = static_cast<RecoveryContext*>(p_context);
@@ -288,7 +334,11 @@ bool recovery_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 	}
 
 	const b3ShapeType target_type = b3Shape_GetType(p_shape_id);
-	if (target_type == b3_meshShape || target_type == b3_heightShape || target_type == b3_voxelGridShape) {
+	if (target_type == b3_voxelGridShape) {
+		recover_from_voxel_grid(*ctx, p_shape_id, body_id, object);
+		return true;
+	}
+	if (target_type == b3_meshShape || target_type == b3_heightShape) {
 		return true;
 	}
 	const b3AABB target_aabb = exact_shape_aabb(p_shape_id);
@@ -685,6 +735,7 @@ bool Box3DPhysicsDirectSpaceState3D::test_body_motion(
 			RecoveryContext context;
 			context.filter = &filter;
 			context.query_aabb = proxy_aabb(shape_proxy.get_proxy());
+			context.proxy = &shape_proxy.get_proxy();
 			context.preferred_motion = p_motion;
 			context.accumulated_push = &accumulated_push;
 			context.push_count = &push_count;
