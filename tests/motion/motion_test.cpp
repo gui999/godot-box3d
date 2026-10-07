@@ -873,8 +873,14 @@ static void stall_post_corner() {
 	CHECK(std::fabs(body.position.y - 0.9f - 4.0f) < 0.3f, "left the landing: y %.3f", body.position.y);
 }
 
-int main() {
+#include "regression_tests.inc"
+
+int main(int argc, char** argv) {
 	b3SetLengthUnitsPerMeter(1.0f);
+	if (argc > 1 && std::strcmp(argv[1], "bench") == 0) {
+		for (int p = 0; p < 4; p++) bench_queries(p % 2 == 1, 20, p >= 2);
+		return 0;
+	}
 	for (Kind kind : { Kind::Box, Kind::Wedge, Kind::Mesh }) {
 		walk_up(kind, false);
 	}
@@ -897,6 +903,9 @@ int main() {
 	deep_penetration();
 	step_and_corner();
 	stall_post_corner();
+	cast_against_the_grid();
+	passage_after_removal();
+	long_cast_beside_a_wall();
 	std::printf("%d checks, %d failures\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;
 }

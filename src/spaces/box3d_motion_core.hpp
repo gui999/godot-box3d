@@ -81,8 +81,9 @@ bool convex_contact(const b3ShapeProxy& p_a, const b3ShapeProxy& p_b, float p_ma
 
 // The shape's contacts with one collider shape within p_params.margin (exact: GJK/EPA for convex shapes, per triangle for meshes,
 // per box for voxel grids), appended to r_contacts. Returns false for a collider type with no contact answer (height fields,
-// compounds), which leaves the caller to its own test. The accept function is applied.
-bool shape_contacts(const Params& p_params, const b3ShapeProxy& p_proxy, int p_local_shape, b3ShapeId p_shape_id, std::vector<Contact>& r_contacts);
+// compounds), which leaves the caller to its own test. The accept function is applied. p_any_only: the caller only asks whether
+// there is a contact, so the answer may hold just one (a mesh or grid stops at its first).
+bool shape_contacts(const Params& p_params, const b3ShapeProxy& p_proxy, int p_local_shape, b3ShapeId p_shape_id, std::vector<Contact>& r_contacts, bool p_any_only = false);
 
 // Whether the shapes (moved by p_offset) come closer than p_params.margin to anything; margin 0 means the surfaces really cross.
 bool overlaps_any(const std::vector<BodyShape>& p_shapes, const Params& p_params, b3Vec3 p_offset);

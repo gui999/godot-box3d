@@ -261,6 +261,7 @@ struct CollectContext {
 	const b3ShapeProxy* body;
 	int local_shape;
 	std::vector<Contact>* contacts;
+	bool any_only = false; // the caller wants to know whether there is a contact, not the contacts
 };
 
 bool collect_callback(b3ShapeId p_shape_id, void* p_context) {
@@ -301,7 +302,7 @@ bool collect_callback(b3ShapeId p_shape_id, void* p_context) {
 			const b3Mesh mesh = b3Shape_GetMesh(p_shape_id);
 			const b3ShapeProxy grown{ body.points, body.count, body.radius + grow };
 			b3MeshRecoverResult results[64];
-			const int count = b3RecoverMesh(&mesh, body_transform, &grown, results, 64);
+			const int count = b3RecoverMesh(&mesh, body_transform, &grown, results, ctx->any_only ? 1 : 64);
 			for (int i = 0; i < count; i++) {
 				Contact contact;
 				contact.shape = p_shape_id;
@@ -323,7 +324,7 @@ bool collect_callback(b3ShapeId p_shape_id, void* p_context) {
 			const float grow = margin + CONTACT_GROWTH;
 			const b3ShapeProxy grown{ body.points, body.count, body.radius + grow };
 			b3VoxelContact results[128];
-			const int count = b3CollideVoxelGrid(b3Shape_GetVoxelGrid(p_shape_id), body_transform, &grown, results, 128);
+			const int count = b3CollideVoxelGrid(b3Shape_GetVoxelGrid(p_shape_id), body_transform, &grown, results, ctx->any_only ? 1 : 128);
 			for (int i = 0; i < count; i++) {
 				Contact contact;
 				contact.shape = p_shape_id;
@@ -391,9 +392,27 @@ bool overlaps_any_margin(const std::vector<BodyShape>& p_shapes, const Params& p
 // contacts of the motion core: at a pose, every piece within the window gives a separating direction n (collider to body) and a
 // gap s, and the body can travel s / closing along the motion before that piece is reached, where closing = -motion . n (a piece
 // that does not close never blocks). The smallest such step is safe, so the sweep cannot tunnel, and a pose is never skipped.
-constexpr float SWEEP_WINDOW = 0.04f;
-constexpr float SWEEP_TOLERANCE = 1.0e-5f;
-constexpr int SWEEP_ITERATIONS = 96;
+constexpr float SWEEP_WINDOW = 0.01f;
+constexpr float SWEEP_TOLERANCE = 1.0e-4f;
+constexpr int SWEEP_ITERATIONS = 400; // a window of 4 cm a step: 16 m of motion beside a surface
+
+// A shape cast hits a mesh from either side, but a mesh without backface collision is solid on the front of its triangles only.
+bool is_backside_mesh_hit(b3ShapeId p_shape_id, int p_triangle_index, const b3Vec3& p_normal) {
+	if (p_triangle_index < 0 || b3Shape_GetType(p_shape_id) != b3_meshShape) {
+		return false;
+	}
+	const b3Mesh mesh = b3Shape_GetMesh(p_shape_id);
+	if (mesh.data->doubleSided != 0 || p_triangle_index >= mesh.data->triangleCount) {
+		return false;
+	}
+	const b3MeshTriangle triangle = b3GetMeshTriangles(mesh.data)[p_triangle_index];
+	const b3Vec3* vertices = b3GetMeshVertices(mesh.data);
+	const b3Vec3 face_normal = b3Cross(
+			b3Sub(vertices[triangle.index2], vertices[triangle.index1]),
+			b3Sub(vertices[triangle.index3], vertices[triangle.index1]));
+	const b3Transform body_transform = b3Body_GetTransform(b3Shape_GetBody(p_shape_id));
+	return b3Dot(b3RotateVector(body_transform.q, face_normal), p_normal) < 0.0f;
+}
 
 // How far a closing piece is kept from the body. A cast query keeps the margin from everything. A body's motion keeps it from what
 // it runs into head on (a floor it falls onto, a wall it walks into, which is what makes it rest a margin above the floor as on
@@ -452,7 +471,7 @@ struct Sweep {
 void init_sweep(Sweep& r_sweep, const std::vector<BodyShape>& p_shapes, const Params& p_params, b3Vec3 p_origin, b3Vec3 p_motion, float p_skin) {
 	r_sweep.shapes = &p_shapes;
 	r_sweep.params = p_params;
-	r_sweep.window = std::max(SWEEP_WINDOW, p_skin + 0.03f);
+	r_sweep.window = std::max(SWEEP_WINDOW, p_skin + 0.06f);
 	r_sweep.params.margin = r_sweep.window;
 	r_sweep.origin = p_origin;
 	r_sweep.motion = p_motion;
@@ -472,13 +491,11 @@ float skin_of(const Sweep& p_sweep, const SkinRule& p_rule, const Contact& p_con
 }
 
 // A body that starts closer than the wanted skin keeps the closeness it has (the rule's cap).
-SkinRule starting_rule(const Sweep& p_sweep, float p_skin) {
+SkinRule starting_rule(const Sweep& p_sweep, float p_skin, const std::vector<Contact>& p_contacts) {
 	SkinRule rule;
 	rule.skin = p_skin;
 	rule.graded = true;
-	std::vector<Contact> contacts;
-	p_sweep.contacts_at(0.0f, contacts);
-	for (const Contact& contact : contacts) {
+	for (const Contact& contact : p_contacts) {
 		if (p_sweep.closes(contact) && skin_of(p_sweep, rule, contact) > 0.0f) {
 			rule.cap = std::min(rule.cap, std::max(0.0f, contact.separation));
 		}
@@ -486,19 +503,141 @@ SkinRule starting_rule(const Sweep& p_sweep, float p_skin) {
 	return rule;
 }
 
+// Box3D's own shape cast, used as the fast sweep through empty space. It reports contact early or a slop late and a cast that starts
+// within the slop of a surface as overlapped at the origin, so it only says where to look: the exact contacts decide.
+const float CAST_BACK_OFF = 3.0f * B3_LINEAR_SLOP;
+constexpr float HEAD_ON = 0.7f; // cos of 45 degrees: a hit this square on is no graze
+
+struct CastContext {
+	const Sweep* sweep;
+	bool hit = false;
+	bool overlapped = false;
+	float fraction = 1.0f;
+	b3Vec3 normal{};
+	bool voxel = false; // the first hit is a voxel grid, whose cast is only good to its cell structure
+};
+
+float cast_callback(b3ShapeId p_shape_id, b3Pos, b3Vec3 p_normal, float p_fraction, uint64_t, int p_triangle_index, int, void* p_context) {
+	auto* ctx = static_cast<CastContext*>(p_context);
+	if (!accepted(ctx->sweep->params, p_shape_id) || ctx->sweep->is_ignored(p_shape_id)) {
+		return -1.0f;
+	}
+	if (is_backside_mesh_hit(p_shape_id, p_triangle_index, p_normal)) {
+		return -1.0f;
+	}
+	// A cast that starts within the slop of a surface (or overlapped) is a hit at the origin with no normal.
+	if (p_fraction <= FLT_EPSILON && b3LengthSquared(p_normal) < 0.25f) {
+		ctx->overlapped = true;
+		return -1.0f;
+	}
+	ctx->hit = true;
+	if (p_fraction < ctx->fraction) {
+		ctx->fraction = p_fraction;
+		ctx->normal = p_normal;
+		ctx->voxel = b3Shape_GetType(p_shape_id) == b3_voxelGridShape;
+	}
+	return p_fraction;
+}
+
+struct FastResult {
+	bool hit = false;
+	bool overlapped = false;
+	float fraction = 1.0f;
+	float head_on = 0.0f; // how squarely the first hit's surface faces the motion: 1 straight on, 0 grazing
+	bool voxel = false; // the first hit is a voxel grid, whose cast is only good to its cell structure
+};
+
+// The first fraction (of the whole motion) at or after p_from where the shapes, grown by p_grow, meet something: Box3D's cast over
+// what is left of the motion. r_overlapped: the cast starts within the slop of something, which it cannot sweep.
+FastResult fast_cast(const Sweep& p_sweep, float p_from, float p_grow) {
+	CastContext ctx{ &p_sweep };
+	const b3Vec3 motion = b3MulSV(1.0f - p_from, p_sweep.motion);
+	const b3Vec3 offset = b3MulAdd(p_sweep.origin, p_from, p_sweep.motion);
+	const bool in_place = offset.x == 0.0f && offset.y == 0.0f && offset.z == 0.0f;
+	for (size_t i = 0; i < p_sweep.shapes->size(); i++) {
+		const BodyShape& shape = (*p_sweep.shapes)[i];
+		if (in_place) {
+			const b3ShapeProxy proxy{ shape.points.data(), (int)shape.points.size(), shape.radius + p_grow };
+			b3World_CastShape(p_sweep.params.world, b3Vec3_zero, &proxy, motion, p_sweep.params.filter, cast_callback, &ctx);
+			continue;
+		}
+		MovedShape moved(shape, offset);
+		moved.proxy.radius += p_grow;
+		b3World_CastShape(p_sweep.params.world, b3Vec3_zero, &moved.proxy, motion, p_sweep.params.filter, cast_callback, &ctx);
+	}
+	FastResult result;
+	result.hit = ctx.hit;
+	result.overlapped = ctx.overlapped;
+	result.voxel = ctx.voxel;
+	if (ctx.hit) {
+		result.fraction = p_from + ctx.fraction * (1.0f - p_from);
+		result.head_on = -b3Dot(b3MulSV(1.0f / p_sweep.length, p_sweep.motion), ctx.normal);
+	}
+	return result;
+}
+
 // The first fraction at or after p_start where a closing piece is within p_skin, or -1 when the motion reaches 1 without one.
-float advance(const Sweep& p_sweep, float p_start, const SkinRule& p_rule) {
+// p_fast: empty space is crossed with Box3D's cast (fast_cast) instead of in steps of the window.
+float advance(const Sweep& p_sweep, float p_start, const SkinRule& p_rule, bool p_fast, const FastResult* p_known = nullptr) {
 	std::vector<Contact> contacts;
 	float t = p_start;
 	float last_ok = p_start;
+	bool homing = !p_fast; // the last pose had a closing piece near: the next step is exact too
+	bool landed = false; // the last step was limited by a closing piece, so this pose is where it was reached
+	bool beside = false; // the cast overlapped a piece and a piece is still within the window: it cannot be crossed by casting
+	// A jump lands a back-off short of Box3D's hit. A cast that is late (a voxel grid's, by up to its cell structure) leaves the body
+	// inside what it hit: the jump is then taken again from where it started, a longer back-off short.
+	float back_off = CAST_BACK_OFF;
+	float jumped_from = -1.0f, jumped_ok = 0.0f, jumped_hit = -1.0f;
+	FastResult jumped_cast;
+	float trusted_to = 0.0f; // Box3D's cast found nothing to hit before this fraction: no unseen piece blocks sooner
+	bool jumped = false;
 	for (int iteration = 0; iteration < SWEEP_ITERATIONS; iteration++) {
+		if (!homing && !beside) {
+			FastResult cast;
+			if (jumped_hit >= 0.0f) {
+				cast = jumped_cast;
+				jumped_hit = -1.0f;
+			} else if (p_known != nullptr && iteration == 0) {
+				cast = *p_known;
+			} else {
+				cast = fast_cast(p_sweep, t, p_rule.skin > 0.0f ? std::min(p_rule.skin, p_rule.cap) : 0.0f);
+			}
+			if (!cast.hit && !cast.overlapped) {
+				return -1.0f;
+			}
+			beside = cast.overlapped;
+			if (cast.hit && !cast.overlapped) {
+				// The hit is only known to the cast's slop across the surface: along a grazing path that is far.
+				const float jump = cast.fraction - back_off / (std::max(0.15f, cast.head_on) * p_sweep.length);
+				if ((jump - t) * p_sweep.length > p_sweep.window) {
+					jumped_from = t;
+					jumped_ok = last_ok;
+					jumped_hit = cast.fraction;
+					jumped_cast = cast;
+					jumped = true;
+					trusted_to = cast.fraction;
+					t = jump;
+					last_ok = t;
+				} else {
+					jumped_hit = -1.0f;
+				}
+			}
+		}
 		p_sweep.contacts_at(t, contacts);
 		// Anything not in the window is at least a window away.
-		float step = p_sweep.window / p_sweep.length;
+		float step = std::max(p_sweep.window / p_sweep.length, trusted_to - t);
 		bool blocked = false;
 		bool overshot = false;
+		bool limited = false;
+		bool inside = false;
 		for (const Contact& contact : contacts) {
+			inside |= contact.separation < -SWEEP_TOLERANCE;
 			if (!p_sweep.closes(contact)) {
+				// Reached through a closing piece and touching, though the surface here faces away (an edge grazed in passing).
+				if (landed && contact.separation <= SWEEP_TOLERANCE) {
+					blocked = true;
+				}
 				continue;
 			}
 			const float gap = contact.separation - skin_of(p_sweep, p_rule, contact);
@@ -509,7 +648,26 @@ float advance(const Sweep& p_sweep, float p_start, const SkinRule& p_rule) {
 				blocked = true;
 				continue;
 			}
-			step = std::min(step, gap / p_sweep.closing(contact));
+			const float reach = gap / p_sweep.closing(contact);
+			if (reach < step) {
+				step = reach;
+				limited = true;
+			}
+		}
+		if (jumped && inside) {
+			// The jump landed inside something: take it again from where it started, further short of the hit.
+			back_off *= 4.0f;
+			t = jumped_from;
+			last_ok = jumped_ok;
+			jumped = false;
+			homing = false;
+			landed = false;
+			continue;
+		}
+		jumped = false;
+		if (jumped_from >= 0.0f) {
+			jumped_hit = -1.0f;
+			jumped_from = -1.0f;
 		}
 		if (overshot && t > last_ok) {
 			// The separating direction was not the closest one and the step went past the skin: bracket it again.
@@ -533,10 +691,13 @@ float advance(const Sweep& p_sweep, float p_start, const SkinRule& p_rule) {
 			return t;
 		}
 		last_ok = t;
+		beside = beside && !contacts.empty();
 		if (t + step >= 1.0f) {
 			return -1.0f;
 		}
 		t += step;
+		landed = limited;
+		homing = limited; // a step that was not limited by a piece left it behind: cross the free space with the cast
 	}
 	return last_ok;
 }
@@ -628,6 +789,7 @@ bool test_motion(const std::vector<BodyShape>& p_shapes, const Params& p_params_
 	const float dead_zone = 0.01f * margin;
 	b3Vec3 offset = b3Vec3_zero;
 	std::vector<Contact> contacts;
+	bool contacts_at_offset = false; // the last gather was at the final offset: the closest pieces are known
 	for (int iteration = 0; iteration < params.recovery_iterations; iteration++) {
 		contacts.clear();
 		gather_contacts(p_shapes, params, offset, contacts);
@@ -642,6 +804,7 @@ bool test_motion(const std::vector<BodyShape>& p_shapes, const Params& p_params_
 			}
 		}
 		if (!moved) {
+			contacts_at_offset = true;
 			break;
 		}
 		offset = b3Add(offset, push);
@@ -658,11 +821,16 @@ bool test_motion(const std::vector<BodyShape>& p_shapes, const Params& p_params_
 	if (motion_length > FLT_EPSILON) {
 		Sweep sweep;
 		init_sweep(sweep, p_shapes, params, offset, motion, margin);
-		const float stop = advance(sweep, 0.0f, starting_rule(sweep, margin));
+		if (!contacts_at_offset) {
+			contacts.clear();
+			gather_contacts(p_shapes, params, offset, contacts);
+		}
+		// The pieces the recovery saw are within the margin: all the closeness a body can start with that the rule cares about.
+		const float stop = advance(sweep, 0.0f, starting_rule(sweep, margin, contacts), true);
 		if (stop >= 0.0f) {
 			hit = true;
 			safe_fraction = stop;
-			const float touch = advance(sweep, stop, SkinRule());
+			const float touch = advance(sweep, stop, SkinRule(), false);
 			if (touch < 0.0f) {
 				unsafe_fraction = 1.0f; // it only comes within the margin
 			} else if (overlaps_any_margin(p_shapes, params, b3MulAdd(offset, touch, motion), 0.0f)) {
@@ -671,7 +839,7 @@ bool test_motion(const std::vector<BodyShape>& p_shapes, const Params& p_params_
 				float lo = touch;
 				float hi = std::min(1.0f, touch + 0.002f / motion_length);
 				if (overlaps_any_margin(p_shapes, params, b3MulAdd(offset, hi, motion), 0.0f)) {
-					for (int i = 0; i < 6; i++) {
+					for (int i = 0; i < 3; i++) {
 						const float mid = 0.5f * (lo + hi);
 						if (overlaps_any_margin(p_shapes, params, b3MulAdd(offset, mid, motion), 0.0f)) {
 							hi = mid;
@@ -765,8 +933,22 @@ bool cast_shapes(const std::vector<BodyShape>& p_shapes, const Params& p_params,
 	Sweep sweep;
 	init_sweep(sweep, p_shapes, p_params, b3Vec3_zero, p_params.motion, skin);
 
-	// A body the shape already touches (within the margin) takes no part, as on Jolt.
-	{
+	// Nothing on the way, as Box3D's own cast sees it (grown by the margin): the common answer, for the price of one cast.
+	FastResult first;
+	first = fast_cast(sweep, 0.0f, skin);
+	if (!first.hit && !first.overlapped) {
+		return false;
+	}
+	// A surface that faces the motion squarely is where Box3D's cast says to a few millimetres (its slop), and no exact contact
+	// can turn it into a miss: only a graze or a start within the slop needs the exact contacts.
+	if (first.hit && !first.overlapped && !first.voxel && first.head_on >= HEAD_ON) {
+		r_safe = std::max(0.0f, first.fraction - 0.002f / length);
+		r_unsafe = first.fraction;
+		return true;
+	}
+
+	// A body the shape already touches (within the margin) takes no part, as on Jolt. The grown cast reports them as overlapped.
+	if (first.overlapped) {
 		std::vector<Contact> contacts;
 		sweep.contacts_at(0.0f, contacts);
 		for (const Contact& contact : contacts) {
@@ -785,41 +967,24 @@ bool cast_shapes(const std::vector<BodyShape>& p_shapes, const Params& p_params,
 
 	SkinRule rule;
 	rule.skin = skin;
-	const float stop = advance(sweep, 0.0f, rule);
+	const float stop = advance(sweep, 0.0f, rule, true, first.overlapped ? nullptr : &first);
 	if (stop < 0.0f) {
 		return false;
 	}
+	// The sweep ends where the gap to the closing piece is the margin (to ten micrometres): the first pose within it follows at once.
 	r_safe = stop;
-	float lo = stop;
-	float hi = std::min(1.0f, stop + 0.002f / length);
-	std::vector<Contact> contacts;
-	auto blocked = [&](float p_fraction) {
-		sweep.contacts_at(p_fraction, contacts);
-		for (const Contact& contact : contacts) {
-			if (contact.separation < skin) {
-				return true;
-			}
-		}
-		return false;
-	};
-	if (blocked(hi)) {
-		for (int i = 0; i < 6; i++) {
-			const float mid = 0.5f * (lo + hi);
-			(blocked(mid) ? hi : lo) = mid;
-		}
-	}
-	r_unsafe = std::max(hi, stop);
+	r_unsafe = std::min(1.0f, stop + 1.0e-4f / length);
 	return true;
 }
 
-bool shape_contacts(const Params& p_params, const b3ShapeProxy& p_proxy, int p_local_shape, b3ShapeId p_shape_id, std::vector<Contact>& r_contacts) {
+bool shape_contacts(const Params& p_params, const b3ShapeProxy& p_proxy, int p_local_shape, b3ShapeId p_shape_id, std::vector<Contact>& r_contacts, bool p_any_only) {
 	switch (b3Shape_GetType(p_shape_id)) {
 		case b3_sphereShape:
 		case b3_capsuleShape:
 		case b3_hullShape:
 		case b3_meshShape:
 		case b3_voxelGridShape: {
-			CollectContext ctx{ &p_params, &p_proxy, p_local_shape, &r_contacts };
+			CollectContext ctx{ &p_params, &p_proxy, p_local_shape, &r_contacts, p_any_only };
 			collect_callback(p_shape_id, &ctx);
 			return true;
 		}

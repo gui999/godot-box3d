@@ -98,7 +98,7 @@ bool overlap_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 		params.world = ctx->world;
 		params.margin = ctx->exact_margin;
 		std::vector<b3m::Contact> contacts;
-		if (b3m::shape_contacts(params, *ctx->exact_proxy, 0, p_shape_id, contacts) && contacts.empty()) {
+		if (b3m::shape_contacts(params, *ctx->exact_proxy, 0, p_shape_id, contacts, true) && contacts.empty()) {
 			return true;
 		}
 	}
