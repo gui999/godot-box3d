@@ -314,21 +314,16 @@ bool collect_callback(b3ShapeId p_shape_id, void* p_context) {
 
 		case b3_voxelGridShape: {
 			const b3ShapeProxy grown{ body.points, body.count, body.radius + margin };
-			b3Vec3 pushes[3];
-			if (b3RecoverVoxelGrid(b3Shape_GetVoxelGrid(p_shape_id), body_transform, &grown, pushes) == 0) {
-				return true;
-			}
-			const b3Vec3 center = centroid(body.points, body.count);
-			for (int i = 0; i < 3; i++) {
-				const float depth = b3Length(pushes[i]);
-				if (depth <= CONTACT_EPSILON) {
-					continue;
-				}
+			// One exact contact per box (a post's corner leaves along its diagonal, not along an axis of its bounds); depth is
+			// the push that leaves the margin, so the separation is margin - depth.
+			b3VoxelContact results[32];
+			const int count = b3CollideVoxelGrid(b3Shape_GetVoxelGrid(p_shape_id), body_transform, &grown, results, 32);
+			for (int i = 0; i < count; i++) {
 				Contact contact;
 				contact.shape = p_shape_id;
-				contact.normal = b3MulSV(1.0f / depth, pushes[i]);
-				contact.point = b3Shape_GetClosestPoint(p_shape_id, center);
-				contact.separation = margin - depth;
+				contact.normal = results[i].normal;
+				contact.point = results[i].point;
+				contact.separation = margin - results[i].depth;
 				contact.local_shape = ctx->local_shape;
 				ctx->contacts->push_back(contact);
 			}

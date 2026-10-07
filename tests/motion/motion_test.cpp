@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+#include "stall_grid.inc"
+
 static int g_failures = 0;
 static int g_checks = 0;
 
@@ -74,6 +76,7 @@ struct Level {
 		for (b3HullData* h : hulls) b3DestroyHull(h);
 		if (grid) b3ReleaseVoxelGrid(grid);
 		if (module_slab) b3ReleaseVoxelGridModule(module_slab);
+		for (b3VoxelGridModule* m : stall_modules) b3ReleaseVoxelGridModule(m);
 	}
 
 	b3BodyId static_body() {
@@ -136,6 +139,28 @@ struct Level {
 		def.modules = modules;
 		def.moduleCount = 1;
 		def.paddedCells = padded.data();
+		grid = b3CreateVoxelGrid(&def);
+		b3ShapeDef shape = b3DefaultShapeDef();
+		b3CreateVoxelGridShape(static_body(), &shape, grid);
+	}
+
+	// The dumped landing of stall_grid.inc: modules of many thin boxes (stairs, posts, rails), cells of 2 m.
+	std::vector<b3VoxelGridModule*> stall_modules;
+	void add_stall_grid() {
+		for (int m = 0; m < STALL_MODULE_COUNT; m++) {
+			stall_modules.push_back(b3CreateVoxelGridModule(STALL_BOXES + STALL_OFFSETS[m] * 6, STALL_OFFSETS[m + 1] - STALL_OFFSETS[m], 2.0f, 20));
+		}
+		b3VoxelGridDef def = {};
+		def.cellCountX = STALL_CELLS_X;
+		def.cellCountY = STALL_CELLS_Y;
+		def.cellCountZ = STALL_CELLS_Z;
+		def.origin = b3Vec3{ 0, 4, 0 };
+		def.cellMeters = 2.0f;
+		def.cellVoxels = 20;
+		def.maxBoxesPerCell = 256;
+		def.modules = stall_modules.data();
+		def.moduleCount = (int)stall_modules.size();
+		def.paddedCells = STALL_CELLS;
 		grid = b3CreateVoxelGrid(&def);
 		b3ShapeDef shape = b3DefaultShapeDef();
 		b3CreateVoxelGridShape(static_body(), &shape, grid);
@@ -671,6 +696,42 @@ static void step_and_corner() {
 	std::printf("fall: lands at y %.4f\n", 3.0f + r.travel.y);
 }
 
+// The game's stall on Box3D: a player standing on a PaintedBuilding landing, 0.22 m beside the corner of a 0.2 m post (box 185
+// of the dumped grid, x 4.0..4.2, z 1.8..2.0). Walking -z touches the corner, whose true normal is diagonal; the contact was an
+// axis push of the box's bounding box (0, 0, 1), a wall in the way that blocked the slide completely.
+static void stall_post_corner() {
+	Level level;
+	level.add_stall_grid();
+	Character body;
+	body.level = &level;
+	const V3 start(3.7803605f, 4.000139f + 0.9f, 2.2915742f);
+
+	Motion r;
+	const bool collided = body.test_motion(start, V3(0, 0, -0.1f), 6, true, r);
+	std::printf("stall: collided %d, %d collisions, travel z %.4f, normal (%.3f %.3f %.3f)\n", collided, r.count, r.travel.z, r.c[0].normal.x, r.c[0].normal.y, r.c[0].normal.z);
+	CHECK(collided && r.count >= 1, "no contact with the post corner");
+	CHECK(std::fabs(r.travel.z + 0.0185f) < 0.004f, "stopped after %.4f instead of 0.0185", -r.travel.z);
+	CHECK(r.c[0].normal.z > 0.5f && r.c[0].normal.z < 0.95f && r.c[0].normal.x < -0.3f && std::fabs(r.c[0].normal.y) < 0.05f, "normal (%.3f %.3f %.3f) is not the corner's diagonal", r.c[0].normal.x, r.c[0].normal.y, r.c[0].normal.z);
+	CHECK(r.c[0].point.y > 4.0f && std::fabs(r.c[0].point.x - 4.0f) < 0.02f && std::fabs(r.c[0].point.z - 2.0f) < 0.02f, "contact point (%.3f %.3f %.3f) is not the corner (4, ., 2)", r.c[0].point.x, r.c[0].point.y, r.c[0].point.z);
+
+	// Free sides stay free.
+	body.test_motion(start, V3(-0.1f, 0, 0), 6, true, r);
+	CHECK(r.count == 0, "-x blocked");
+	body.test_motion(start, V3(0, 0, 0.1f), 6, true, r);
+	CHECK(r.count == 0, "+z blocked");
+
+	// Walking -z with move_and_slide slides off the corner and carries on.
+	body.position = start;
+	body.on_floor = true;
+	for (int tick = 0; tick < 90; tick++) {
+		body.velocity = V3(0, -0.1f, -3.0f);
+		body.move_and_slide(1.0f / 60.0f);
+	}
+	std::printf("stall walk: x %.3f y %.3f z %.3f\n", body.position.x, body.position.y - 0.9f, body.position.z);
+	CHECK(body.position.z < start.z - 1.0f, "stuck at z %.3f", body.position.z);
+	CHECK(std::fabs(body.position.y - 0.9f - 4.0f) < 0.3f, "left the landing: y %.3f", body.position.y);
+}
+
 int main() {
 	b3SetLengthUnitsPerMeter(1.0f);
 	for (Kind kind : { Kind::Box, Kind::Wedge, Kind::Mesh }) {
@@ -690,6 +751,7 @@ int main() {
 	rest_on_floor();
 	deep_penetration();
 	step_and_corner();
+	stall_post_corner();
 	std::printf("%d checks, %d failures\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;
 }
