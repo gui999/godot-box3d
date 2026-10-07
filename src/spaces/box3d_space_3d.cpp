@@ -151,9 +151,10 @@ void Box3DSpace3D::step(float p_step) {
 		const b3Counters c = b3World_GetCounters(world_id);
 		const b3Profile p = b3World_GetProfile(world_id);
 		auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
-		UtilityFunctions::print(vformat("BOX3D_DIAG step=%d pre=%.2f world_step=%.2f post=%.2f | prof step=%.2f pairs=%.2f collide=%.2f solve=%.2f split=%.2f sleep=%.2f | bodies=%d awake=%d fastest=%.3f islands=%d contacts=%d awake_contacts=%d tasks=%d workers=%d grid_shapes=%d worst_step=%.2f [pairs=%.2f collide=%.2f solve=%.2f contacts=%d awake_contacts=%d]",
+		UtilityFunctions::print(vformat("BOX3D_DIAG step=%d pre=%.2f world_step=%.2f post=%.2f | prof step=%.2f pairs=%.2f collide=%.2f solve=%.2f split=%.2f sleep=%.2f | bodies=%d awake=%d fastest=%.3f islands=%d contacts=%d awake_contacts=%d tasks=%d workers=%d grid_shapes=%d worst_step=%.2f [pairs=%.2f collide=%.2f solve=%.2f contacts=%d awake_contacts=%d | setup=%.2f constraints=%.2f transforms=%.2f split=%.2f refit=%.2f bullets=%.2f sleep=%.2f sensors=%.2f hit_events=%.2f]",
 				diagnostic_steps, ms(t1 - t0), ms(t2 - t1), ms(t3 - t2), p.step, p.pairs, p.collide, p.solve, p.splitIslands, p.sleepIslands,
-				dynamic, awake, fastest, c.islandCount, c.contactCount, c.awakeContactCount, c.taskCount, box3d_worker_count(), (int)Box3DVoxelGridShapeImpl3D::get_live_shape_count(), worst_step_ms, worst_profile.pairs, worst_profile.collide, worst_profile.solve, worst_contacts, worst_awake));
+				dynamic, awake, fastest, c.islandCount, c.contactCount, c.awakeContactCount, c.taskCount, box3d_worker_count(), (int)Box3DVoxelGridShapeImpl3D::get_live_shape_count(), worst_step_ms, worst_profile.pairs, worst_profile.collide, worst_profile.solve, worst_contacts, worst_awake,
+				worst_profile.solverSetup, worst_profile.constraints, worst_profile.transforms, worst_profile.splitIslands, worst_profile.refit, worst_profile.bullets, worst_profile.sleepIslands, worst_profile.sensors, worst_profile.hitEvents));
 		worst_step_ms = 0.0;
 	}
 
