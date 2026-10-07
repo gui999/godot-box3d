@@ -13,6 +13,8 @@ using namespace godot;
 
 namespace {
 const char *WORKER_COUNT_SETTING = "physics/box3d/worker_count";
+// Terra: OS priority of Box3D's scheduler threads (normal, above_normal, highest, time_critical).
+const char *WORKER_PRIORITY_SETTING = "physics/box3d/worker_priority";
 const char *DIAGNOSTICS_SETTING = "physics/box3d/diagnostics";
 // Terra: contact softness. Box3D pushes overlapping bodies apart at up to contact_speed, which on a
 // body of thousands of tonnes is an enormous impulse; Godot and Jolt recover gently.
@@ -50,6 +52,18 @@ void box3d_initialize() {
 	info["hint_string"] = "0,32,1";
 	settings->add_property_info(info);
 
+	if (!settings->has_setting(WORKER_PRIORITY_SETTING)) {
+		settings->set_setting(WORKER_PRIORITY_SETTING, 1);
+	}
+	settings->set_initial_value(WORKER_PRIORITY_SETTING, 1);
+	settings->set_restart_if_changed(WORKER_PRIORITY_SETTING, true);
+	Dictionary priority_info;
+	priority_info["name"] = WORKER_PRIORITY_SETTING;
+	priority_info["type"] = Variant::INT;
+	priority_info["hint"] = PROPERTY_HINT_ENUM;
+	priority_info["hint_string"] = "Normal,Above Normal,Highest,Time Critical";
+	settings->add_property_info(priority_info);
+
 	if (!settings->has_setting(DIAGNOSTICS_SETTING)) {
 		settings->set_setting(DIAGNOSTICS_SETTING, false);
 	}
@@ -76,6 +90,12 @@ int box3d_worker_count() {
 		return setting > 0 ? std::clamp(setting, 1, B3_MAX_WORKERS) : box3d_default_worker_count();
 	}();
 	return count;
+}
+
+int box3d_worker_priority() {
+	static const int priority = std::clamp(
+			(int)ProjectSettings::get_singleton()->get_setting_with_override(WORKER_PRIORITY_SETTING), 0, 3);
+	return priority;
 }
 
 float box3d_contact_hertz() {

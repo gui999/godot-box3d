@@ -23,6 +23,7 @@ Box3DSpace3D::Box3DSpace3D() {
 	b3WorldDef def = b3DefaultWorldDef();
 	// With no task callbacks set, any count above 1 engages Box3D's internal scheduler.
 	def.workerCount = box3d_worker_count();
+	def.workerPriority = box3d_worker_priority();
 	def.contactHertz = box3d_contact_hertz();
 	def.contactDampingRatio = box3d_contact_damping_ratio();
 	def.contactSpeed = box3d_contact_speed();
