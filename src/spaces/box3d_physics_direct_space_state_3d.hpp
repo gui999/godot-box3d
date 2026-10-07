@@ -4,6 +4,10 @@
 #include <godot_cpp/classes/physics_server3d_extension_motion_result.hpp>
 #include <godot_cpp/classes/physics_server3d_extension_shape_rest_info.hpp>
 #include <godot_cpp/classes/physics_server3d_extension_shape_result.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/rid.hpp>
+#include <godot_cpp/variant/vector3.hpp>
 
 using namespace godot;
 
@@ -97,8 +101,14 @@ public:
 			bool p_recovery_as_collision,
 			PhysicsServer3DExtensionMotionResult* p_result) const;
 
+	// Character mover queries for a script-side capsule controller (bound for Call from C#); layouts are in the .cpp.
+	PackedFloat32Array collide_mover(const RID& p_body, const Vector3& p_center1, const Vector3& p_center2, float p_radius);
+	float cast_mover(const RID& p_body, const Vector3& p_center1, const Vector3& p_center2, float p_radius, const Vector3& p_translation);
+	int box3d_byte_count();
+	Dictionary world_counters();
+
 protected:
-	static void _bind_methods() {}
+	static void _bind_methods();
 
 private:
 	Box3DSpace3D* space = nullptr;

@@ -43,6 +43,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 	target_compile_options(godot-box3d PRIVATE -Wall)
 endif()
 
+# godot-cpp defines this for MSVC on its own target, which ExternalProject does not propagate; ClassDB::bind_method
+# needs it there (MSVC member pointers differ in size per class).
+if(MSVC)
+	target_compile_definitions(godot-box3d PRIVATE TYPED_METHOD_BIND)
+endif()
+
 # GitHub's Windows runner and the documented Ninja build select MinGW. Its default shared
 # runtime dependencies are not shipped with the addon, so a release DLL otherwise fails to
 # load with Windows error 126 on a clean Godot installation.

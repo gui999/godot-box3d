@@ -15,7 +15,9 @@
 
 #include <box3d/box3d.h>
 
+#include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/object.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/templates/local_vector.hpp>
 
 namespace {
@@ -523,6 +525,160 @@ Vector3 Box3DPhysicsDirectSpaceState3D::_get_closest_point_to_object_volume(cons
 	b3Vec3 result_point{};
 	b3Body_GetClosestPoint(object->get_body_id(), &result_point, godot_to_b3(p_point));
 	return b3_to_godot(result_point);
+}
+
+namespace {
+
+constexpr int32_t MOVER_MAX_PLANES = 64;
+constexpr int32_t MOVER_PLANE_STRIDE = 8;
+
+// The mover queries filter like test_body_motion: the body's mask, minus the body and its collision exceptions.
+bool make_mover_filter(const Box3DPhysicsDirectSpaceState3D* p_state, const RID& p_body, Box3DQueryFilter3D& r_filter) {
+	Box3DBodyImpl3D* body = Box3DPhysicsServer3D::get_singleton()->get_body(p_body);
+	ERR_FAIL_NULL_V_MSG(body, false, "Box3D mover query: the RID is not a body.");
+	r_filter.set_collision_mask(body->get_collision_mask());
+	r_filter.direct_state = p_state;
+	r_filter.exclude.insert(p_body);
+	for (const KeyValue<RID, Box3DFilterJointImpl3D*>& entry : body->get_collision_exceptions()) {
+		r_filter.exclude.insert(entry.key);
+	}
+	return true;
+}
+
+// A mover only touches solid bodies (no areas, no sensors) that the filter does not exclude.
+bool mover_accepts(b3ShapeId p_shape_id, const Box3DQueryFilter3D& p_filter) {
+	if (b3Shape_IsSensor(p_shape_id)) {
+		return false;
+	}
+	Box3DShapedObjectImpl3D* object = nullptr;
+	return should_report(b3Body_GetUserData(b3Shape_GetBody(p_shape_id)), p_filter, object);
+}
+
+struct CollideMoverContext {
+	const Box3DQueryFilter3D* filter = nullptr;
+	b3Vec3 origin = b3Vec3_zero;
+	PackedFloat32Array* planes = nullptr;
+	int32_t count = 0;
+};
+
+bool collide_mover_result_fcn(b3ShapeId p_shape_id, const b3PlaneResult* p_planes, int p_plane_count, void* p_context) {
+	auto* ctx = static_cast<CollideMoverContext*>(p_context);
+	if (!mover_accepts(p_shape_id, *ctx->filter)) {
+		return true;
+	}
+	// b3BodyType values are 0 static, 1 kinematic, 2 dynamic.
+	const float mode = (float)b3Body_GetType(b3Shape_GetBody(p_shape_id));
+	for (int i = 0; i < p_plane_count && ctx->count < MOVER_MAX_PLANES; i++) {
+		const b3PlaneResult& result = p_planes[i];
+		const b3Vec3 point = b3Add(ctx->origin, result.point);
+		float* out = ctx->planes->ptrw() + ctx->count * MOVER_PLANE_STRIDE;
+		out[0] = result.plane.normal.x;
+		out[1] = result.plane.normal.y;
+		out[2] = result.plane.normal.z;
+		out[3] = result.plane.offset;
+		out[4] = point.x;
+		out[5] = point.y;
+		out[6] = point.z;
+		out[7] = mode;
+		ctx->count++;
+	}
+	return ctx->count < MOVER_MAX_PLANES;
+}
+
+bool cast_mover_filter_fcn(b3ShapeId p_shape_id, void* p_context) {
+	return mover_accepts(p_shape_id, *static_cast<const Box3DQueryFilter3D*>(p_context));
+}
+
+} // namespace
+
+void Box3DPhysicsDirectSpaceState3D::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("collide_mover", "body", "center1", "center2", "radius"), &Box3DPhysicsDirectSpaceState3D::collide_mover);
+	ClassDB::bind_method(D_METHOD("cast_mover", "body", "center1", "center2", "radius", "translation"), &Box3DPhysicsDirectSpaceState3D::cast_mover);
+	ClassDB::bind_method(D_METHOD("box3d_byte_count"), &Box3DPhysicsDirectSpaceState3D::box3d_byte_count);
+	ClassDB::bind_method(D_METHOD("world_counters"), &Box3DPhysicsDirectSpaceState3D::world_counters);
+}
+
+// 8 floats per plane: normal xyz, plane offset (as Box3D reports it, relative to the capsule midpoint), contact point xyz in
+// world space, collider body mode (0 static, 1 kinematic, 2 dynamic). The capsule goes to Box3D relative to its midpoint to
+// keep the coordinates small.
+PackedFloat32Array Box3DPhysicsDirectSpaceState3D::collide_mover(
+		const RID& p_body, const Vector3& p_center1, const Vector3& p_center2, float p_radius) {
+	PackedFloat32Array planes;
+	ERR_FAIL_NULL_V(space, planes);
+	Box3DQueryFilter3D filter;
+	if (!make_mover_filter(this, p_body, filter)) {
+		return planes;
+	}
+
+	const b3Vec3 center1 = godot_to_b3(p_center1);
+	const b3Vec3 center2 = godot_to_b3(p_center2);
+	const b3Vec3 origin = b3MulSV(0.5f, b3Add(center1, center2));
+	const b3Capsule mover = { b3Sub(center1, origin), b3Sub(center2, origin), p_radius };
+
+	planes.resize(MOVER_MAX_PLANES * MOVER_PLANE_STRIDE);
+	CollideMoverContext context;
+	context.filter = &filter;
+	context.origin = origin;
+	context.planes = &planes;
+	b3World_CollideMover(space->get_world_id(), origin, &mover, filter.filter, collide_mover_result_fcn, &context);
+	planes.resize(context.count * MOVER_PLANE_STRIDE);
+	return planes;
+}
+
+// The free fraction of the translation, 1 when nothing is hit.
+float Box3DPhysicsDirectSpaceState3D::cast_mover(
+		const RID& p_body, const Vector3& p_center1, const Vector3& p_center2, float p_radius, const Vector3& p_translation) {
+	ERR_FAIL_NULL_V(space, 1.0f);
+	Box3DQueryFilter3D filter;
+	if (!make_mover_filter(this, p_body, filter)) {
+		return 1.0f;
+	}
+
+	const b3Vec3 center1 = godot_to_b3(p_center1);
+	const b3Vec3 center2 = godot_to_b3(p_center2);
+	const b3Vec3 origin = b3MulSV(0.5f, b3Add(center1, center2));
+	const b3Capsule mover = { b3Sub(center1, origin), b3Sub(center2, origin), p_radius };
+	return b3World_CastMover(
+			space->get_world_id(), origin, &mover, godot_to_b3(p_translation), filter.filter, cast_mover_filter_fcn, &filter);
+}
+
+int Box3DPhysicsDirectSpaceState3D::box3d_byte_count() {
+	return b3GetByteCount();
+}
+
+Dictionary Box3DPhysicsDirectSpaceState3D::world_counters() {
+	Dictionary result;
+	ERR_FAIL_NULL_V(space, result);
+	const b3Counters c = b3World_GetCounters(space->get_world_id());
+	result["body_count"] = c.bodyCount;
+	result["shape_count"] = c.shapeCount;
+	result["contact_count"] = c.contactCount;
+	result["joint_count"] = c.jointCount;
+	result["island_count"] = c.islandCount;
+	result["stack_used"] = c.stackUsed;
+	result["arena_capacity"] = c.arenaCapacity;
+	result["static_tree_height"] = c.staticTreeHeight;
+	result["tree_height"] = c.treeHeight;
+	result["sat_call_count"] = c.satCallCount;
+	result["sat_cache_hit_count"] = c.satCacheHitCount;
+	result["byte_count"] = c.byteCount;
+	result["task_count"] = c.taskCount;
+	PackedInt32Array color_counts;
+	for (int i = 0; i < 24; i++) {
+		color_counts.push_back(c.colorCounts[i]);
+	}
+	result["color_counts"] = color_counts;
+	PackedInt32Array manifold_counts;
+	for (int i = 0; i < B3_CONTACT_MANIFOLD_COUNT_BUCKETS; i++) {
+		manifold_counts.push_back(c.manifoldCounts[i]);
+	}
+	result["manifold_counts"] = manifold_counts;
+	result["awake_contact_count"] = c.awakeContactCount;
+	result["recycled_contact_count"] = c.recycledContactCount;
+	result["distance_iterations"] = c.distanceIterations;
+	result["push_back_iterations"] = c.pushBackIterations;
+	result["root_iterations"] = c.rootIterations;
+	return result;
 }
 
 bool Box3DPhysicsDirectSpaceState3D::test_body_motion(
