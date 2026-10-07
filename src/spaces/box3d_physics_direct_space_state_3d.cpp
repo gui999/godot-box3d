@@ -56,6 +56,25 @@ Object* collider_object(const Box3DShapedObjectImpl3D& p_object) {
 	return id == 0 ? nullptr : reinterpret_cast<Object*>(internal::gdextension_interface_object_get_instance_from_id(id));
 }
 
+// A shape cast hits a mesh from either side (Box3D's casts are two sided). A mesh without backface collision is only solid on
+// the front of its triangles, so a hit whose normal points out of a triangle's back is not a hit.
+bool is_backside_mesh_hit(b3ShapeId p_shape_id, int p_triangle_index, const b3Vec3& p_normal) {
+	if (p_triangle_index < 0 || b3Shape_GetType(p_shape_id) != b3_meshShape) {
+		return false;
+	}
+	const b3Mesh mesh = b3Shape_GetMesh(p_shape_id);
+	if (mesh.data->doubleSided != 0 || p_triangle_index >= mesh.data->triangleCount) {
+		return false;
+	}
+	const b3MeshTriangle triangle = b3GetMeshTriangles(mesh.data)[p_triangle_index];
+	const b3Vec3* vertices = b3GetMeshVertices(mesh.data);
+	const b3Vec3 face_normal = b3Cross(
+			b3Sub(vertices[triangle.index2], vertices[triangle.index1]),
+			b3Sub(vertices[triangle.index3], vertices[triangle.index1]));
+	const b3WorldTransform body_transform = b3Body_GetTransform(b3Shape_GetBody(p_shape_id));
+	return b3Dot(b3RotateVector(body_transform.q, face_normal), p_normal) < 0.0f;
+}
+
 bool overlap_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 	auto* ctx = static_cast<OverlapContext*>(p_context);
 	if (ctx->count >= ctx->max_results) {
@@ -157,6 +176,10 @@ float cast_result_fcn(b3ShapeId p_shape_id, b3Pos p_point, b3Vec3 p_normal, floa
 		return -1.0f;
 	}
 
+	if (!ctx->is_ray && is_backside_mesh_hit(p_shape_id, p_triangle_index, p_normal)) {
+		return -1.0f;
+	}
+
 	ctx->has_hit = true;
 	ctx->triangle_index = p_triangle_index;
 	ctx->shape_id = p_shape_id;
@@ -210,7 +233,7 @@ float motion_cast_result_fcn(
 		b3Vec3 p_normal,
 		float p_fraction,
 		uint64_t,
-		int,
+		int p_triangle_index,
 		int,
 		void* p_context) {
 	auto* ctx = static_cast<MotionCastContext*>(p_context);
@@ -218,6 +241,10 @@ float motion_cast_result_fcn(
 	const b3BodyId body_id = b3Shape_GetBody(p_shape_id);
 	Box3DShapedObjectImpl3D* object = nullptr;
 	if (!should_report(b3Body_GetUserData(body_id), *ctx->filter, object)) {
+		return -1.0f;
+	}
+
+	if (is_backside_mesh_hit(p_shape_id, p_triangle_index, p_normal)) {
 		return -1.0f;
 	}
 
@@ -327,6 +354,37 @@ void recover_from_voxel_grid(RecoveryContext& p_context, b3ShapeId p_shape_id, b
 	}
 }
 
+// A mesh answers its own recovery, triangle by triangle: each triangle the proxy sank into pushes it out along the triangle's
+// normal on the side the proxy is on (both sides when the shape has backface collision, the front only when not). The pushes
+// accumulate per axis like the voxel grid's.
+void recover_from_mesh(RecoveryContext& p_context, b3ShapeId p_shape_id, b3BodyId p_body_id, Box3DShapedObjectImpl3D* p_object) {
+	const b3WorldTransform body_transform = b3Body_GetTransform(p_body_id);
+	const b3Mesh mesh = b3Shape_GetMesh(p_shape_id);
+	b3MeshRecoverResult results[16];
+	const int count = b3RecoverMesh(&mesh, b3Transform{ body_transform.p, body_transform.q }, p_context.proxy, results, 16);
+	for (int i = 0; i < count; i++) {
+		const Vector3 normal = b3_to_godot(results[i].normal);
+		const Vector3 slopped_push = normal * (results[i].depth + B3_LINEAR_SLOP);
+		for (int32_t axis = 0; axis < 3; axis++) {
+			if (Math::abs(slopped_push[axis]) > Math::abs((*p_context.accumulated_push)[axis])) {
+				(*p_context.accumulated_push)[axis] = slopped_push[axis];
+			}
+		}
+
+		MotionCollisionData collision;
+		collision.object = p_object;
+		collision.position = b3_to_godot(results[i].point);
+		collision.normal = normal;
+		collision.depth = results[i].depth;
+		collision.local_shape = p_context.local_shape;
+		collision.collider_shape = find_shape_index(*p_object, p_shape_id);
+		append_motion_collision(*p_context.collisions, collision);
+	}
+	if (count > 0) {
+		(*p_context.push_count)++;
+	}
+}
+
 bool recovery_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 	auto* ctx = static_cast<RecoveryContext*>(p_context);
 	const b3BodyId body_id = b3Shape_GetBody(p_shape_id);
@@ -340,7 +398,11 @@ bool recovery_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 		recover_from_voxel_grid(*ctx, p_shape_id, body_id, object);
 		return true;
 	}
-	if (target_type == b3_meshShape || target_type == b3_heightShape) {
+	if (target_type == b3_meshShape) {
+		recover_from_mesh(*ctx, p_shape_id, body_id, object);
+		return true;
+	}
+	if (target_type == b3_heightShape) {
 		return true;
 	}
 	const b3AABB target_aabb = exact_shape_aabb(p_shape_id);

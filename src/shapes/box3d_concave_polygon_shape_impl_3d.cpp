@@ -15,7 +15,7 @@ Box3DConcavePolygonShapeImpl3D::~Box3DConcavePolygonShapeImpl3D() {
 Variant Box3DConcavePolygonShapeImpl3D::get_data() const {
 	Dictionary data;
 	data["faces"] = faces;
-	data["backface_collision"] = false;
+	data["backface_collision"] = backface_collision;
 	return data;
 }
 
@@ -24,9 +24,11 @@ void Box3DConcavePolygonShapeImpl3D::set_data(const Variant& p_data) {
 		const Dictionary data = p_data;
 		ERR_FAIL_COND(!data.has("faces"));
 		faces = data["faces"];
+		backface_collision = data.has("backface_collision") ? (bool)data["backface_collision"] : false;
 	} else {
 		ERR_FAIL_COND(p_data.get_type() != Variant::PACKED_VECTOR3_ARRAY);
 		faces = p_data;
+		backface_collision = false;
 	}
 	// Only the bounds are computed here; the Box3D mesh (BVH) is built lazily by get_mesh(), so a
 	// worker thread can prebuild it (see Box3DPhysicsDirectSpaceState3D::_intersect_shape).
@@ -52,7 +54,7 @@ void Box3DConcavePolygonShapeImpl3D::set_data(const Variant& p_data) {
 const b3MeshData* Box3DConcavePolygonShapeImpl3D::get_mesh() const {
 	std::lock_guard<std::mutex> lock(mesh_mutex);
 	if (!mesh_built) {
-		mesh = build_mesh(faces, Transform3D());
+		mesh = build_mesh(faces, Transform3D(), backface_collision);
 		mesh_built = true;
 	}
 	return mesh;
@@ -60,7 +62,8 @@ const b3MeshData* Box3DConcavePolygonShapeImpl3D::get_mesh() const {
 
 b3MeshData* Box3DConcavePolygonShapeImpl3D::build_mesh(
 		const PackedVector3Array& p_faces,
-		const Transform3D& p_transform) {
+		const Transform3D& p_transform,
+		bool p_backface_collision) {
 	const int face_count = p_faces.size();
 	if (face_count < 3 || face_count % 3 != 0) {
 		return nullptr;
@@ -96,6 +99,7 @@ b3MeshData* Box3DConcavePolygonShapeImpl3D::build_mesh(
 	def.weldVertices = false;
 	def.useMedianSplit = false;
 	def.identifyEdges = false;
+	def.doubleSided = p_backface_collision;
 
 	return b3CreateMesh(&def, nullptr, 0);
 }

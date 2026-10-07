@@ -33,14 +33,18 @@ public:
 
 	const PackedVector3Array& get_faces() const { return faces; }
 
+	// Godot's backface_collision: the triangles collide from both sides when set, from the front only when not.
+	bool get_backface_collision() const { return backface_collision; }
+
 	// Box3D meshes carry no transform, so an offset instance needs its own baked copy.
-	static b3MeshData* build_mesh(const PackedVector3Array& p_faces, const Transform3D& p_transform);
+	static b3MeshData* build_mesh(const PackedVector3Array& p_faces, const Transform3D& p_transform, bool p_backface_collision);
 
 private:
 	mutable std::mutex mesh_mutex;
 	mutable bool mesh_built = false;
 
 	PackedVector3Array faces;
+	bool backface_collision = false;
 	mutable b3MeshData* mesh = nullptr;
 	AABB aabb;
 };

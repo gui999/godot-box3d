@@ -150,7 +150,7 @@ b3ShapeId create_box3d_shape(
 				return b3CreateMeshShape(p_body_id, &def, mesh, b3Vec3{1.0f, 1.0f, 1.0f});
 			}
 
-			b3MeshData* baked = Box3DConcavePolygonShapeImpl3D::build_mesh(mesh_shape->get_faces(), local);
+			b3MeshData* baked = Box3DConcavePolygonShapeImpl3D::build_mesh(mesh_shape->get_faces(), local, mesh_shape->get_backface_collision());
 			if (baked == nullptr) {
 				return b3_nullShapeId;
 			}
