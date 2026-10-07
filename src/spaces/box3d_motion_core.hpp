@@ -9,9 +9,11 @@
 // The core of Godot's body_test_motion on Box3D, free of Godot types so a Box3D-only harness can drive it
 // (tests/motion). Contract (Jolt's, which the game was tuned on):
 //   1. recover: up to a few iterations, each gathering real contacts (normal, signed separation) of every body shape
-//      within the margin and pushing the body out along the contact normals to half the margin;
-//   2. cast: sweep the body along the motion; the safe fraction is the last pose that does not overlap, the unsafe
-//      fraction the first that does (a bisection on exact overlaps, so both are millimetre exact);
+//      within the margin and pushing the body out along the contact normals to three quarters of the margin;
+//   2. cast: sweep the body along the motion by conservative advancement on exact contact separations (never Box3D's shape
+//      cast, which reports contact early); the safe fraction is the last pose a skin short of the first surface that closes in
+//      on the body (a margin from what it runs into head on, so bodies rest a margin above a floor), the unsafe fraction the
+//      first exact overlap after it, both to well under a millimetre;
 //   3. collide: at the unsafe pose gather the contacts within the margin that oppose the motion, deepest first.
 // Contact normals point from the collider to the body. A collision's depth is the margin plus the penetration.
 namespace b3m {
@@ -76,6 +78,19 @@ void collect_contacts(const Params& p_params, const b3ShapeProxy& p_proxy, int p
 // witness point on A's surface. Penetrating cores are resolved by EPA. Returns false when the shapes are farther
 // apart than p_margin.
 bool convex_contact(const b3ShapeProxy& p_a, const b3ShapeProxy& p_b, float p_margin, b3Vec3& r_normal_a_to_b, float& r_separation, b3Vec3& r_point_on_a);
+
+// The shape's contacts with one collider shape within p_params.margin (exact: GJK/EPA for convex shapes, per triangle for meshes,
+// per box for voxel grids), appended to r_contacts. Returns false for a collider type with no contact answer (height fields,
+// compounds), which leaves the caller to its own test. The accept function is applied.
+bool shape_contacts(const Params& p_params, const b3ShapeProxy& p_proxy, int p_local_shape, b3ShapeId p_shape_id, std::vector<Contact>& r_contacts);
+
+// Whether the shapes (moved by p_offset) come closer than p_params.margin to anything; margin 0 means the surfaces really cross.
+bool overlaps_any(const std::vector<BodyShape>& p_shapes, const Params& p_params, b3Vec3 p_offset);
+
+// Godot's cast_motion: the shapes at their given pose swept along p_params.motion, p_params.margin as the clearance kept. The
+// safe fraction is the last pose farther than the margin from everything (a body already within it is ignored), the unsafe
+// one the first within it, both to about a millimetre. Returns whether anything was hit; [1, 1] otherwise.
+bool cast_shapes(const std::vector<BodyShape>& p_shapes, const Params& p_params, float& r_safe, float& r_unsafe);
 
 // The whole motion test. Returns whether the body collided (Godot's body_test_motion result).
 bool test_motion(const std::vector<BodyShape>& p_shapes, const Params& p_params, Result& r_result);

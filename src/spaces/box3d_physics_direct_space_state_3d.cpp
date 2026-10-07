@@ -25,6 +25,11 @@ struct OverlapContext {
 	PhysicsServer3DExtensionShapeResult* results = nullptr;
 	int32_t max_results = 0;
 	int32_t count = 0;
+	// When set, a shape is only reported when it really is within margin of this proxy: b3World_OverlapShape also answers for
+	// shapes a speculative distance away.
+	const b3ShapeProxy* exact_proxy = nullptr;
+	float exact_margin = 0.0f;
+	b3WorldId world = b3_nullWorldId;
 };
 
 bool should_report(void* p_user_data, const Box3DQueryFilter3D& p_filter, Box3DShapedObjectImpl3D*& r_object) {
@@ -88,6 +93,16 @@ bool overlap_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 		return true;
 	}
 
+	if (ctx->exact_proxy != nullptr) {
+		b3m::Params params;
+		params.world = ctx->world;
+		params.margin = ctx->exact_margin;
+		std::vector<b3m::Contact> contacts;
+		if (b3m::shape_contacts(params, *ctx->exact_proxy, 0, p_shape_id, contacts) && contacts.empty()) {
+			return true;
+		}
+	}
+
 	PhysicsServer3DExtensionShapeResult& result = ctx->results[ctx->count];
 	result.rid = object->get_rid();
 	result.collider_id = object->get_instance_id();
@@ -103,6 +118,7 @@ struct CollideShapeContext {
 	Vector3* results = nullptr;
 	int32_t max_results = 0;
 	int32_t count = 0;
+	float margin = 0.0f;
 };
 
 // Reports the closest points between the query shape and one overlapping shape. Godot wants
@@ -139,6 +155,9 @@ bool collide_shape_result_fcn(b3ShapeId p_shape_id, void* p_context) {
 
 		b3SimplexCache cache{};
 		const b3DistanceOutput output = b3ShapeDistance(&input, &cache, nullptr, 0);
+		if (output.distance > ctx->margin) {
+			return true; // within the speculative distance, not within the margin
+		}
 
 		// GJK cannot recover penetration depth, so an overlapping pair reports its witness
 		// point for both sides rather than a fabricated depth.
@@ -322,12 +341,18 @@ int32_t Box3DPhysicsDirectSpaceState3D::_intersect_shape(
 	Box3DQueryFilter3D filter(p_collision_mask, p_collide_with_bodies, p_collide_with_areas);
 	filter.direct_state = this;
 
+	const float margin = MAX(0.0f, (float)p_margin);
+	const b3ShapeProxy query{ shape_proxy.get_proxy().points, shape_proxy.get_proxy().count, shape_proxy.get_proxy().radius + margin };
+
 	OverlapContext context;
 	context.filter = &filter;
 	context.results = p_results;
 	context.max_results = p_max_results;
+	context.exact_proxy = &shape_proxy.get_proxy();
+	context.exact_margin = margin;
+	context.world = space->get_world_id();
 
-	b3World_OverlapShape(space->get_world_id(), b3Vec3_zero, &shape_proxy.get_proxy(), filter.filter, overlap_result_fcn, &context);
+	b3World_OverlapShape(space->get_world_id(), b3Vec3_zero, &query, filter.filter, overlap_result_fcn, &context);
 
 	return context.count;
 }
@@ -358,23 +383,26 @@ bool Box3DPhysicsDirectSpaceState3D::_cast_motion(
 	Box3DQueryFilter3D filter(p_collision_mask, p_collide_with_bodies, p_collide_with_areas);
 	filter.direct_state = this;
 
-	RayContext context;
-	context.filter = &filter;
+	// Godot (and Jolt) answer a cast that hits nothing with [1, 1]; false means the query failed. The sweep is the motion core's,
+	// on exact separations: Box3D's own shape cast reports contact early (within its linear slop).
+	const b3ShapeProxy& proxy = shape_proxy.get_proxy();
+	b3m::BodyShape body_shape;
+	body_shape.points.assign(proxy.points, proxy.points + proxy.count);
+	body_shape.radius = proxy.radius;
 
-	b3World_CastShape(space->get_world_id(), b3Vec3_zero, &shape_proxy.get_proxy(), godot_to_b3(p_motion), filter.filter, cast_result_fcn, &context);
+	b3m::Params params;
+	params.world = space->get_world_id();
+	params.filter = filter.filter;
+	params.accept = motion_accept;
+	params.accept_context = &filter;
+	params.margin = MAX(0.0f, (float)p_margin);
+	params.motion = godot_to_b3(p_motion);
 
-	// Godot (and Jolt) answer a cast that hits nothing with [1, 1]; false means the query failed.
-	if (!context.has_hit) {
-		*p_closest_safe = 1.0;
-		*p_closest_unsafe = 1.0;
-		return true;
-	}
-
-	// The safe fraction stops short of the touch by a couple of millimetres, as Godot brackets it.
-	const float length = (float)p_motion.length();
-	const float back_off = length > 0.0f ? 0.002f / length : 0.0f;
-	*p_closest_safe = MAX(0.0f, context.fraction - back_off);
-	*p_closest_unsafe = context.fraction;
+	float safe = 1.0f;
+	float unsafe = 1.0f;
+	b3m::cast_shapes({ body_shape }, params, safe, unsafe);
+	*p_closest_safe = safe;
+	*p_closest_unsafe = unsafe;
 	return true;
 }
 
@@ -406,14 +434,17 @@ bool Box3DPhysicsDirectSpaceState3D::_collide_shape(
 	Box3DQueryFilter3D filter(p_collision_mask, p_collide_with_bodies, p_collide_with_areas);
 	filter.direct_state = this;
 
+	const float margin = MAX(0.0f, (float)p_margin);
+	const b3ShapeProxy query{ shape_proxy.get_proxy().points, shape_proxy.get_proxy().count, shape_proxy.get_proxy().radius + margin };
+
 	CollideShapeContext context;
 	context.filter = &filter;
 	context.query_proxy = &shape_proxy.get_proxy();
 	context.results = static_cast<Vector3*>(p_results);
 	context.max_results = p_max_results;
+	context.margin = margin;
 
-	b3World_OverlapShape(
-			space->get_world_id(), b3Vec3_zero, &shape_proxy.get_proxy(), filter.filter, collide_shape_result_fcn, &context);
+	b3World_OverlapShape(space->get_world_id(), b3Vec3_zero, &query, filter.filter, collide_shape_result_fcn, &context);
 
 	*p_result_count = context.count;
 	return context.count > 0;
@@ -441,26 +472,36 @@ bool Box3DPhysicsDirectSpaceState3D::_rest_info(
 	Box3DQueryFilter3D filter(p_collision_mask, p_collide_with_bodies, p_collide_with_areas);
 	filter.direct_state = this;
 
-	RayContext context;
-	context.filter = &filter;
+	// The closest contact within the margin at the given pose (the motion plays no part, as on Jolt).
+	b3m::Params params;
+	params.world = space->get_world_id();
+	params.filter = filter.filter;
+	params.accept = motion_accept;
+	params.accept_context = &filter;
+	params.margin = MAX(0.0f, (float)p_margin);
 
-	b3World_CastShape(space->get_world_id(), b3Vec3_zero, &shape_proxy.get_proxy(), godot_to_b3(p_motion), filter.filter, cast_result_fcn, &context);
-
-	if (!context.has_hit) {
+	std::vector<b3m::Contact> contacts;
+	b3m::collect_contacts(params, shape_proxy.get_proxy(), 0, contacts);
+	const b3m::Contact* closest = nullptr;
+	for (const b3m::Contact& contact : contacts) {
+		if (closest == nullptr || contact.separation < closest->separation) {
+			closest = &contact;
+		}
+	}
+	if (closest == nullptr) {
 		return false;
 	}
 
-	const b3BodyId body_id = b3Shape_GetBody(context.shape_id);
-	auto* object = static_cast<Box3DShapedObjectImpl3D*>(b3Body_GetUserData(body_id));
+	auto* object = static_cast<Box3DShapedObjectImpl3D*>(b3Body_GetUserData(b3Shape_GetBody(closest->shape)));
 	if (object == nullptr) {
 		return false;
 	}
 
-	p_info->point = b3_to_godot(context.point);
-	p_info->normal = b3_to_godot(context.normal);
+	p_info->point = b3_to_godot(closest->point);
+	p_info->normal = b3_to_godot(closest->normal);
 	p_info->rid = object->get_rid();
 	p_info->collider_id = object->get_instance_id();
-	p_info->shape = MAX(find_shape_index(*object, context.shape_id), 0);
+	p_info->shape = MAX(find_shape_index(*object, closest->shape), 0);
 
 	auto* body = dynamic_cast<Box3DBodyImpl3D*>(object);
 	if (body != nullptr) {

@@ -144,6 +144,43 @@ struct Level {
 		b3CreateVoxelGridShape(static_body(), &shape, grid);
 	}
 
+	// A voxel cylinder of 0.1 m columns (axis vertical through (p_x, ., p_z), 2 m tall, radius p_radius), in one 2 m cell. The
+	// columns' footprints are returned in r_columns as x0, z0 (each 0.1 m wide).
+	void add_voxel_cylinder(float p_x, float p_z, float p_radius, std::vector<float>& r_columns) {
+		const float cell = 2.0f;
+		std::vector<float> boxes;
+		for (int i = 0; i < 20; i++) {
+			for (int k = 0; k < 20; k++) {
+				const float dx = (i + 0.5f) * 0.1f - 1.0f;
+				const float dz = (k + 0.5f) * 0.1f - 1.0f;
+				if (dx * dx + dz * dz <= p_radius * p_radius) {
+					const float b[6] = { i * 0.1f, 0.0f, k * 0.1f, (i + 1) * 0.1f, 2.0f, (k + 1) * 0.1f };
+					boxes.insert(boxes.end(), b, b + 6);
+					r_columns.push_back(p_x - 1.0f + i * 0.1f);
+					r_columns.push_back(p_z - 1.0f + k * 0.1f);
+				}
+			}
+		}
+		module_slab = b3CreateVoxelGridModule(boxes.data(), (int)boxes.size() / 6, cell, 20);
+		std::vector<int> padded(3 * 3 * 3, -1);
+		padded[(1 * 3 + 1) * 3 + 1] = 0;
+		b3VoxelGridDef def = {};
+		def.cellCountX = 1;
+		def.cellCountY = 1;
+		def.cellCountZ = 1;
+		def.origin = b3Vec3{ p_x - 1.0f, 0.0f, p_z - 1.0f };
+		def.cellMeters = cell;
+		def.cellVoxels = 20;
+		def.maxBoxesPerCell = 256;
+		b3VoxelGridModule* modules[1] = { module_slab };
+		def.modules = modules;
+		def.moduleCount = 1;
+		def.paddedCells = padded.data();
+		grid = b3CreateVoxelGrid(&def);
+		b3ShapeDef shape = b3DefaultShapeDef();
+		b3CreateVoxelGridShape(static_body(), &shape, grid);
+	}
+
 	// The dumped landing of stall_grid.inc: modules of many thin boxes (stairs, posts, rails), cells of 2 m.
 	std::vector<b3VoxelGridModule*> stall_modules;
 	void add_stall_grid() {
@@ -615,7 +652,7 @@ static void no_phantom_push() {
 	Character body;
 	body.level = &level;
 	// On the floor in front of the ramp's foot, 0.3 m clear of the ramp's face.
-	const V3 center(-0.9f, 0.9f + 0.0005f, 0);
+	const V3 center(-0.9f, 0.9f + 0.001f, 0); // resting a margin above the floor
 	Motion r;
 	const bool collided = body.test_motion(center, V3(), 4, true, r);
 	std::printf("beside the ramp foot: travel (%.5f %.5f %.5f) collided %d\n", r.travel.x, r.travel.y, r.travel.z, collided);
@@ -635,6 +672,110 @@ static void rest_on_floor() {
 	CHECK(r.c[0].normal.y > 0.999f, "normal y %.4f", r.c[0].normal.y);
 	CHECK(r.depth >= 0.001f && r.depth < 0.0025f, "depth %.5f", r.depth);
 	CHECK(r.safe < 0.2f, "safe fraction %.4f", r.safe);
+}
+
+// The game's player (capsule r 0.34, h 1.76, origin at its centre; margin 0.001) walking and standing on a flat floor rests one
+// margin above it, as on Jolt: the foot (origin - 0.88) stays within [+0.0005, +0.002] of the floor top for 120 ticks.
+static void rest_height(bool p_voxel) {
+	Level level;
+	if (p_voxel) {
+		level.add_voxel_floor(-3, 0.0f, -2, 3, 2);
+	} else {
+		level.add_box(V3(0, -0.5f, 0), V3(20, 0.5f, 20));
+	}
+	for (int walking = 0; walking < 2; walking++) {
+		Character body;
+		body.level = &level;
+		body.radius = 0.34f;
+		body.height = 1.76f;
+		body.position = V3(-2, 0.88f + 0.05f, 0);
+		float min_foot = 1e9f, max_foot = -1e9f;
+		for (int tick = 0; tick < 120; tick++) {
+			body.velocity = V3(walking ? 1.5f : 0.0f, body.on_floor ? -0.1f : body.velocity.y - 9.8f / 60.0f, 0);
+			body.move_and_slide(1.0f / 60.0f);
+			if (tick >= 20) {
+				min_foot = std::fmin(min_foot, body.position.y - 0.88f);
+				max_foot = std::fmax(max_foot, body.position.y - 0.88f);
+			}
+		}
+		std::printf("rest height on %s floor, %s: foot y %.5f .. %.5f\n", p_voxel ? "voxel" : "box", walking ? "walking" : "standing", min_foot, max_foot);
+		CHECK(min_foot >= 0.0005f && max_foot <= 0.002f, "foot y %.5f .. %.5f outside [0.0005, 0.002] (%s, %s)", min_foot, max_foot, p_voxel ? "voxel" : "box", walking ? "walking" : "standing");
+	}
+}
+
+static b3m::BodyShape capsule_shape(V3 p_center, float p_radius, float p_height) {
+	const float half = std::fmax(0.0f, p_height * 0.5f - p_radius);
+	b3m::BodyShape shape;
+	shape.points = { b3Vec3(p_center + V3(0, half, 0)), b3Vec3(p_center + V3(0, -half, 0)) };
+	shape.radius = p_radius;
+	return shape;
+}
+
+static b3m::BodyShape box_shape(V3 p_center, float p_half) {
+	b3m::BodyShape shape;
+	for (int sx = -1; sx <= 1; sx += 2)
+		for (int sy = -1; sy <= 1; sy += 2)
+			for (int sz = -1; sz <= 1; sz += 2) shape.points.push_back(b3Vec3(p_center + V3(sx * p_half, sy * p_half, sz * p_half)));
+	shape.radius = 0.0f;
+	return shape;
+}
+
+// PhysicsDirectSpaceState3D.cast_motion (ActiveCover.ClearPath): a capsule (r 0.34, h 1.76) swept past a voxel cylinder of 0.1 m
+// columns. 1 cm clear of the columns it reports [1, 1]; 1 cm inside it reports the analytic touch to a millimetre.
+static void cast_past_cylinder() {
+	Level level;
+	std::vector<float> columns;
+	level.add_voxel_cylinder(0.0f, 0.0f, 0.5f, columns);
+	const float radius = 0.34f;
+	float z_extent = -1e9f;
+	for (size_t i = 0; i < columns.size(); i += 2) z_extent = std::fmax(z_extent, columns[i + 1] + 0.1f);
+	for (int inside = 0; inside < 2; inside++) {
+		const float z = z_extent + radius + (inside ? -0.01f : 0.01f);
+		const float start_x = -1.5f, length = 3.0f;
+		b3m::Params params;
+		params.world = level.world;
+		params.filter = b3DefaultQueryFilter();
+		params.margin = 0.0f;
+		params.motion = b3Vec3{ length, 0, 0 };
+		float safe = 1, unsafe = 1;
+		const bool hit = b3m::cast_shapes({ capsule_shape(V3(start_x, 1.0f, z), radius, 1.76f) }, params, safe, unsafe);
+		if (!inside) {
+			std::printf("cast 1 cm clear of the cylinder: hit %d safe %.4f unsafe %.4f\n", hit, safe, unsafe);
+			CHECK(!hit && safe == 1.0f && unsafe == 1.0f, "hit %d safe %.4f unsafe %.4f (expect [1, 1])", hit, safe, unsafe);
+			continue;
+		}
+		// The first column to touch: the capsule's disc at x reaches a column's rectangle when dx^2 + dz^2 <= r^2.
+		float touch_x = 1e9f;
+		for (size_t i = 0; i < columns.size(); i += 2) {
+			const float dz = std::fmax(0.0f, std::fmax(columns[i + 1] - z, z - (columns[i + 1] + 0.1f)));
+			if (dz < radius) touch_x = std::fmin(touch_x, columns[i] - std::sqrt(radius * radius - dz * dz));
+		}
+		const float safe_x = start_x + safe * length, unsafe_x = start_x + unsafe * length;
+		std::printf("cast 1 cm into the cylinder: hit %d safe x %.4f unsafe x %.4f analytic %.4f\n", hit, safe_x, unsafe_x, touch_x);
+		CHECK(hit, "no hit");
+		CHECK(std::fabs(safe_x - touch_x) < 0.001f && std::fabs(unsafe_x - touch_x) < 0.001f, "safe x %.4f unsafe x %.4f vs analytic %.4f", safe_x, unsafe_x, touch_x);
+	}
+}
+
+// intersect_shape / collide_shape: a box 5 mm clear of a floor is not touching it, one 5 mm into it is.
+static void exact_overlap() {
+	for (int voxel = 0; voxel < 2; voxel++) {
+		Level level;
+		if (voxel) {
+			level.add_voxel_floor(-3, 0.0f, -2, 3, 2);
+		} else {
+			level.add_box(V3(0, -0.5f, 0), V3(20, 0.5f, 20));
+		}
+		b3m::Params params;
+		params.world = level.world;
+		params.filter = b3DefaultQueryFilter();
+		params.margin = 0.0f;
+		const bool clear = b3m::overlaps_any({ box_shape(V3(0, 0.5f + 0.005f, 0), 0.5f) }, params, b3Vec3_zero);
+		const bool into = b3m::overlaps_any({ box_shape(V3(0, 0.5f - 0.005f, 0), 0.5f) }, params, b3Vec3_zero);
+		std::printf("box 5 mm over a %s floor: %d, 5 mm into it: %d\n", voxel ? "voxel" : "box", clear, into);
+		CHECK(!clear, "a box 5 mm clear of the %s floor is reported touching", voxel ? "voxel" : "box");
+		CHECK(into, "a box 5 mm into the %s floor is not reported", voxel ? "voxel" : "box");
+	}
 }
 
 // Core penetration (EPA): a box proxy sunk into a turned box, and a capsule core inside one.
@@ -749,6 +890,10 @@ int main() {
 	embedded_recovery();
 	no_phantom_push();
 	rest_on_floor();
+	rest_height(false);
+	rest_height(true);
+	cast_past_cylinder();
+	exact_overlap();
 	deep_penetration();
 	step_and_corner();
 	stall_post_corner();
