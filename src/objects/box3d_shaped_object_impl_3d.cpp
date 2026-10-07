@@ -484,6 +484,29 @@ void Box3DShapedObjectImpl3D::detach_shape(Box3DShapeImpl3D* p_shape) {
 	_shapes_changed();
 }
 
+void Box3DShapedObjectImpl3D::release_shape_instances(const Box3DShapeImpl3D* p_shape) {
+	for (auto& instance : shapes) {
+		if (instance.get_shape() == p_shape && instance.has_shape_id()) {
+			_destroy_shape_instance(instance);
+		}
+	}
+}
+
+void Box3DShapedObjectImpl3D::restore_shape_instances(const Box3DShapeImpl3D* p_shape) {
+	if (!has_body_id()) {
+		return;
+	}
+	for (auto& instance : shapes) {
+		if (instance.get_shape() == p_shape && !instance.is_disabled() && !instance.has_shape_id()) {
+			_create_shape_instance(instance);
+		}
+	}
+	_shapes_changed();
+	if (b3Body_GetType(body_id) != b3_staticBody) {
+		b3Body_SetAwake(body_id, true);
+	}
+}
+
 bool Box3DShapedObjectImpl3D::_is_grid_instance(const Box3DShapeInstance3D& p_instance) {
 	// The voxel grid is the only custom shape.
 	return p_instance.get_shape() != nullptr && p_instance.get_shape()->get_type() == PhysicsServer3D::SHAPE_CUSTOM;

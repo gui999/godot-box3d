@@ -73,6 +73,12 @@ public:
 	// Takes a freed shape off this object: its b3 shapes go and the attachments forget it.
 	void detach_shape(Box3DShapeImpl3D* p_shape);
 
+	// A shape's data is about to change: this object's b3 shapes of it go (the attachments stay, keeping their
+	// Godot shape index). restore_shape_instances recreates them from the new data, wakes the body and marks mass.
+	void release_shape_instances(const Box3DShapeImpl3D* p_shape);
+
+	void restore_shape_instances(const Box3DShapeImpl3D* p_shape);
+
 	// Brings this object's attachments of a voxel grid shape up to date: the given padded cells (a
 	// grid update, applied in place) or, when null, the whole grid (new grid data).
 	void update_voxel_grid(const Box3DVoxelGridShapeImpl3D* p_grid, const std::vector<int32_t>* p_changed_cells);

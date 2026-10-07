@@ -151,7 +151,7 @@ RID Box3DPhysicsServer3D::_custom_shape_create() {
 void Box3DPhysicsServer3D::_shape_set_data(const RID& p_shape, const Variant& p_data) {
 	Box3DShapeImpl3D* shape = shape_owner.get_or_null(p_shape);
 	ERR_FAIL_NULL(shape);
-	shape->set_data(p_data);
+	shape->update_data(p_data);
 }
 
 void Box3DPhysicsServer3D::_shape_set_custom_solver_bias(const RID& p_shape, double p_bias) {
@@ -1326,6 +1326,7 @@ void Box3DPhysicsServer3D::_free_rid(const RID& p_rid) {
 	}
 
 	if (Box3DShapeImpl3D* shape = shape_owner.get_or_null(p_rid)) {
+		shape->detach_from_owners();
 		memdelete(shape);
 		shape_owner.free(p_rid);
 		return;

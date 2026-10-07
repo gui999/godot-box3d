@@ -33,6 +33,14 @@ public:
 
 	virtual AABB get_aabb() const = 0;
 
+	// The server's entry for shape_set_data: a voxel grid updates in place (its own set_data); any other shape
+	// takes its owners' b3 shapes off first (Box3D shapes point at the old hull/mesh), stores the data, then every
+	// owner recreates its attachments of this shape in place, keeping the Godot shape index.
+	void update_data(const Variant& p_data);
+
+	// Takes every owner's b3 shapes of this shape away and forgets the owners (the shape is being freed).
+	void detach_from_owners();
+
 	void add_owner(Box3DShapedObjectImpl3D* p_owner);
 
 	void remove_owner(Box3DShapedObjectImpl3D* p_owner);

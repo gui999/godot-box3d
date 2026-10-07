@@ -875,6 +875,85 @@ static void stall_post_corner() {
 
 #include "regression_tests.inc"
 
+
+// A shape whose data changes while a body uses it (Box3DShapedObjectImpl3D::release/restore_shape_instances): the body's b3 shape is
+// destroyed and created again from the new data on the same body, then mass is recomputed from the shapes. The plugin classes need
+// godot-cpp, so this proves the Box3D side of that sequence: a crouched capsule passes under a bar it hit standing, a resized box
+// reports the new AABB and blocks accordingly, and a body's mass follows its shape.
+static b3ShapeId make_capsule(b3BodyId p_body, float p_height, float p_radius) {
+	b3ShapeDef def = b3DefaultShapeDef();
+	def.updateBodyMass = false;
+	b3Capsule capsule;
+	capsule.center1 = b3Vec3{ 0, p_radius, 0 };
+	capsule.center2 = b3Vec3{ 0, p_height - p_radius, 0 };
+	capsule.radius = p_radius;
+	return b3CreateCapsuleShape(p_body, &def, &capsule);
+}
+
+static float run_under_bar(b3WorldId p_world, b3BodyId p_body, float p_to_x) {
+	b3Body_SetTransform(p_body, b3Vec3{ 0, 0, 0 }, b3Quat_identity);
+	b3Body_SetLinearVelocity(p_body, b3Vec3{ 4, 0, 0 });
+	for (int i = 0; i < 180; i++) {
+		b3World_Step(p_world, 1.0f / 60.0f, 4);
+		b3Body_SetLinearVelocity(p_body, b3Vec3{ 4, 0, 0 });
+	}
+	return (float)b3Body_GetPosition(p_body).x;
+}
+
+static void shape_data_rebuild() {
+	b3WorldDef world_def = b3DefaultWorldDef();
+	world_def.gravity = b3Vec3{ 0, 0, 0 };
+	b3WorldId world = b3CreateWorld(&world_def);
+	{
+		b3BodyDef static_def = b3DefaultBodyDef();
+		b3BodyId bar_body = b3CreateBody(world, &static_def);
+		b3BoxHull bar = b3MakeTransformedBoxHull(0.5f, 0.5f, 3.0f, b3Transform{ b3Vec3{ 3, 1.7f, 0 }, b3Quat_identity }); // underside at 1.2 m
+		b3ShapeDef def = b3DefaultShapeDef();
+		b3CreateHullShape(bar_body, &def, &bar.base);
+	}
+	b3BodyDef body_def = b3DefaultBodyDef();
+	body_def.type = b3_dynamicBody;
+	body_def.motionLocks.angularX = body_def.motionLocks.angularY = body_def.motionLocks.angularZ = true;
+	b3BodyId body = b3CreateBody(world, &body_def);
+
+	b3ShapeId standing = make_capsule(body, 1.8f, 0.3f);
+	b3Body_ApplyMassFromShapes(body);
+	const float standing_mass = b3Body_GetMass(body);
+	const float blocked_x = run_under_bar(world, body, 6.0f);
+	std::printf("shape rebuild: standing stops at x %.3f, mass %.4f\n", blocked_x, standing_mass);
+	CHECK(blocked_x < 2.5f, "standing capsule reached x %.3f", blocked_x);
+
+	b3DestroyShape(standing, true);
+	make_capsule(body, 0.8f, 0.3f);
+	b3Body_SetAwake(body, true);
+	b3Body_ApplyMassFromShapes(body);
+	const float crouched_mass = b3Body_GetMass(body);
+	const float passed_x = run_under_bar(world, body, 6.0f);
+	std::printf("shape rebuild: crouched reaches x %.3f, mass %.4f\n", passed_x, crouched_mass);
+	CHECK(passed_x > 5.0f, "crouched capsule stopped at x %.3f", passed_x);
+	CHECK(crouched_mass < standing_mass * 0.7f, "mass %.4f did not follow the shorter capsule (%.4f)", crouched_mass, standing_mass);
+
+	// A box resized in place: new AABB, new blocking.
+	b3BodyDef box_def = b3DefaultBodyDef();
+	box_def.type = b3_dynamicBody;
+	b3BodyId box_body = b3CreateBody(world, &box_def);
+	b3BoxHull small_box = b3MakeBoxHull(0.25f, 0.25f, 0.25f);
+	b3ShapeDef box_shape_def = b3DefaultShapeDef();
+	box_shape_def.updateBodyMass = false;
+	b3ShapeId box_shape = b3CreateHullShape(box_body, &box_shape_def, &small_box.base);
+	b3Body_ApplyMassFromShapes(box_body);
+	const float small_mass = b3Body_GetMass(box_body);
+	b3DestroyShape(box_shape, true);
+	b3BoxHull big_box = b3MakeBoxHull(0.5f, 1.0f, 0.5f);
+	box_shape = b3CreateHullShape(box_body, &box_shape_def, &big_box.base);
+	b3Body_ApplyMassFromShapes(box_body);
+	const b3AABB aabb = b3Shape_GetAABB(box_shape);
+	std::printf("shape rebuild: resized box aabb y %.3f..%.3f, mass %.4f -> %.4f\n", aabb.lowerBound.y, aabb.upperBound.y, small_mass, b3Body_GetMass(box_body));
+	CHECK(std::fabs((aabb.upperBound.y - aabb.lowerBound.y) - 2.0f) < 0.05f, "box height %.3f", aabb.upperBound.y - aabb.lowerBound.y);
+	CHECK(b3Body_GetMass(box_body) > small_mass * 7.0f, "box mass %.4f", b3Body_GetMass(box_body));
+	b3DestroyWorld(world);
+}
+
 int main(int argc, char** argv) {
 	b3SetLengthUnitsPerMeter(1.0f);
 	if (argc > 1 && std::strcmp(argv[1], "bench") == 0) {
@@ -906,6 +985,7 @@ int main(int argc, char** argv) {
 	cast_against_the_grid();
 	passage_after_removal();
 	long_cast_beside_a_wall();
+	shape_data_rebuild();
 	std::printf("%d checks, %d failures\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;
 }
