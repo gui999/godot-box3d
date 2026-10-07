@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iterator>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -87,13 +88,24 @@ b3VoxelGridModule* Box3DVoxelModuleCache::acquire(const float* p_boxes, int p_bo
 	}
 	// Modules no grid holds any more (hole-carved cells replaced since) leave the cache when it grows.
 	if (cache.size() >= cache_sweep_at) {
+		// Only this cache holds them (it retains under the lock, so none can be taken meanwhile); they are
+		// freed on a thread of their own: terrain grids make tens of thousands of distinct modules, and
+		// freeing a streamed-out region's at once held the thread that made the next grid 10–110 ms.
+		std::vector<b3VoxelGridModule*> dead;
 		for (auto it = cache.begin(); it != cache.end();) {
 			if (b3VoxelGridModule_GetReferenceCount(it->second.module) == 1) {
-				b3ReleaseVoxelGridModule(it->second.module);
+				dead.push_back(it->second.module);
 				it = cache.erase(it);
 			} else {
 				++it;
 			}
+		}
+		if (!dead.empty()) {
+			std::thread([dead = std::move(dead)]() {
+				for (b3VoxelGridModule* module : dead) {
+					b3ReleaseVoxelGridModule(module);
+				}
+			}).detach();
 		}
 		cache_sweep_at = std::max<size_t>(4096, cache.size() * 2);
 	}

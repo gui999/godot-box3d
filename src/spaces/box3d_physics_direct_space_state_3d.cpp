@@ -14,6 +14,10 @@
 #include "box3d_space_3d.hpp"
 
 #include <box3d/box3d.h>
+#include "../shapes/box3d_voxel_module_cache.hpp"
+#include <mutex>
+#include <deque>
+#include <chrono>
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/object.hpp>
@@ -596,6 +600,7 @@ void Box3DPhysicsDirectSpaceState3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("cast_mover", "body", "center1", "center2", "radius", "translation"), &Box3DPhysicsDirectSpaceState3D::cast_mover);
 	ClassDB::bind_method(D_METHOD("box3d_byte_count"), &Box3DPhysicsDirectSpaceState3D::box3d_byte_count);
 	ClassDB::bind_method(D_METHOD("world_counters"), &Box3DPhysicsDirectSpaceState3D::world_counters);
+	ClassDB::bind_method(D_METHOD("prepare_voxel_modules", "boxes", "box_offsets", "cell_meters", "cell_voxels"), &Box3DPhysicsDirectSpaceState3D::prepare_voxel_modules);
 }
 
 // 8 floats per plane: normal xyz, plane offset (as Box3D reports it, relative to the capsule midpoint), contact point xyz in
@@ -642,6 +647,46 @@ float Box3DPhysicsDirectSpaceState3D::cast_mover(
 			space->get_world_id(), origin, &mover, godot_to_b3(p_translation), filter.filter, cast_mover_filter_fcn, &filter);
 }
 
+namespace {
+
+// Modules derived ahead of time on a worker, held until their grid's body has had time to enter.
+struct PreparedModules {
+	std::chrono::steady_clock::time_point at;
+	std::vector<b3VoxelGridModule*> modules;
+};
+std::mutex prepared_mutex;
+std::deque<PreparedModules> prepared;
+constexpr double PREPARED_SECONDS = 10.0;
+
+} // namespace
+
+// Derives a voxel grid's modules into the module cache now, on the calling thread (a worker building the
+// grid), so the body that takes the grid finds them made instead of deriving them on the main thread as
+// it enters the space (a terrain chunk's grid holds thousands of distinct boxes). Boxes and offsets as
+// the grid shape's data takes them. Each module is held 10 s, then released (the cache keeps it while a
+// grid does). Thread safe.
+void Box3DPhysicsDirectSpaceState3D::prepare_voxel_modules(const PackedFloat32Array& p_boxes, const PackedInt32Array& p_box_offsets, float p_cell_meters, int p_cell_voxels) {
+	PreparedModules made;
+	made.at = std::chrono::steady_clock::now();
+	const float* boxes = p_boxes.ptr();
+	for (int64_t m = 0; m + 1 < p_box_offsets.size(); m++) {
+		const int32_t first = p_box_offsets[m], end = p_box_offsets[m + 1];
+		ERR_FAIL_COND_MSG(first < 0 || end < first || (int64_t)end * 6 > p_boxes.size(), "Box3D: prepare_voxel_modules was given offsets past its boxes.");
+		made.modules.push_back(Box3DVoxelModuleCache::acquire(boxes + (size_t)first * 6, end - first, p_cell_meters, p_cell_voxels));
+	}
+	std::vector<b3VoxelGridModule*> expired;
+	{
+		std::lock_guard<std::mutex> lock(prepared_mutex);
+		while (!prepared.empty() && std::chrono::duration<double>(made.at - prepared.front().at).count() > PREPARED_SECONDS) {
+			expired.insert(expired.end(), prepared.front().modules.begin(), prepared.front().modules.end());
+			prepared.pop_front();
+		}
+		prepared.push_back(std::move(made));
+	}
+	for (b3VoxelGridModule* module : expired) {
+		b3ReleaseVoxelGridModule(module);
+	}
+}
 int Box3DPhysicsDirectSpaceState3D::box3d_byte_count() {
 	return b3GetByteCount();
 }

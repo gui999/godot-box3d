@@ -106,6 +106,7 @@ public:
 	float cast_mover(const RID& p_body, const Vector3& p_center1, const Vector3& p_center2, float p_radius, const Vector3& p_translation);
 	int box3d_byte_count();
 	Dictionary world_counters();
+	void prepare_voxel_modules(const PackedFloat32Array& p_boxes, const PackedInt32Array& p_box_offsets, float p_cell_meters, int p_cell_voxels);
 
 protected:
 	static void _bind_methods();
