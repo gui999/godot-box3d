@@ -17,6 +17,7 @@
 #include "../shapes/box3d_voxel_module_cache.hpp"
 #include <mutex>
 #include <deque>
+#include <cfloat>
 #include <chrono>
 
 #include <godot_cpp/core/class_db.hpp>
@@ -601,6 +602,10 @@ void Box3DPhysicsDirectSpaceState3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("box3d_byte_count"), &Box3DPhysicsDirectSpaceState3D::box3d_byte_count);
 	ClassDB::bind_method(D_METHOD("world_counters"), &Box3DPhysicsDirectSpaceState3D::world_counters);
 	ClassDB::bind_method(D_METHOD("prepare_voxel_modules", "boxes", "box_offsets", "cell_meters", "cell_voxels"), &Box3DPhysicsDirectSpaceState3D::prepare_voxel_modules);
+	ClassDB::bind_method(D_METHOD("set_shape_max_normal_impulse", "body", "shape_index", "impulse"), &Box3DPhysicsDirectSpaceState3D::set_shape_max_normal_impulse);
+	ClassDB::bind_method(D_METHOD("get_shape_max_normal_impulse", "body", "shape_index"), &Box3DPhysicsDirectSpaceState3D::get_shape_max_normal_impulse);
+	ClassDB::bind_method(D_METHOD("set_limit_pass_through", "enabled"), &Box3DPhysicsDirectSpaceState3D::set_limit_pass_through);
+	ClassDB::bind_method(D_METHOD("shape_contact_impulses", "body", "shape_index"), &Box3DPhysicsDirectSpaceState3D::shape_contact_impulses);
 }
 
 // 8 floats per plane: normal xyz, plane offset (as Box3D reports it, relative to the capsule midpoint), contact point xyz in
@@ -687,6 +692,98 @@ void Box3DPhysicsDirectSpaceState3D::prepare_voxel_modules(const PackedFloat32Ar
 		b3ReleaseVoxelGridModule(module);
 	}
 }
+// Terra (D604): the most normal impulse in N*s that a contact of the body's shape (its Godot shape index) may apply over
+// one step, its sub-steps and restitution included; a contact takes the lower of its two shapes' limits, and each contact
+// has the whole limit (two bodies on one shape in a step each meet it). INF is no limit (the default). The body keeps the
+// limit across rebuilds of its shape, and it takes effect at the next step: set it between steps, on the main thread
+// (Box3D refuses a change while it steps). Only contacts on Box3D's scalar path honour it, which every voxel grid,
+// mesh and height field contact is; a contact between two convex shapes (hull, box, sphere, capsule) ignores it.
+void Box3DPhysicsDirectSpaceState3D::set_shape_max_normal_impulse(const RID& p_body, int p_shape_index, float p_impulse) {
+	Box3DBodyImpl3D* body = Box3DPhysicsServer3D::get_singleton()->get_body(p_body);
+	ERR_FAIL_NULL_MSG(body, "Box3D set_shape_max_normal_impulse: the RID is not a body.");
+	body->set_shape_max_normal_impulse(p_shape_index, p_impulse);
+}
+
+// The body's shape's limit as set_shape_max_normal_impulse set it (FLT_MAX for none).
+float Box3DPhysicsDirectSpaceState3D::get_shape_max_normal_impulse(const RID& p_body, int p_shape_index) {
+	Box3DBodyImpl3D* body = Box3DPhysicsServer3D::get_singleton()->get_body(p_body);
+	ERR_FAIL_NULL_V_MSG(body, FLT_MAX, "Box3D get_shape_max_normal_impulse: the RID is not a body.");
+	return body->get_shape_max_normal_impulse(p_shape_index);
+}
+
+// Whether continuous collision passes a shape whose limit gave way this step, so a fast body carries on through what it
+// broke (on by default). The mark is per shape: every fast body passes that shape in that step. Between steps only.
+void Box3DPhysicsDirectSpaceState3D::set_limit_pass_through(bool p_enabled) {
+	ERR_FAIL_NULL(space);
+	b3World_EnableLimitPassThrough(space->get_world_id(), p_enabled);
+}
+
+// What each body touching the body's shape (its Godot shape index) took from it over the last step: one Dictionary per
+// touching shape pair that applied any normal impulse, with collider (RID), collider_id (the collider's instance id),
+// collider_shape (its Godot shape index), impulse (the net normal impulse in N*s over the step, sub-steps and
+// restitution included: under a limit at most the limit, and the limit itself when the contact spent it), point (the
+// impulse-weighted contact point in world space) and normal (the unit direction the shape pushed the collider). Read
+// between steps: after the step the limits were set for, before the next.
+Array Box3DPhysicsDirectSpaceState3D::shape_contact_impulses(const RID& p_body, int p_shape_index) {
+	Array result;
+	Box3DBodyImpl3D* body = Box3DPhysicsServer3D::get_singleton()->get_body(p_body);
+	ERR_FAIL_NULL_V_MSG(body, result, "Box3D shape_contact_impulses: the RID is not a body.");
+	ERR_FAIL_INDEX_V(p_shape_index, body->get_shape_count(), result);
+	if (!body->has_body_id() || !body->has_shape_id(p_shape_index)) {
+		return result;
+	}
+
+	const b3ShapeId shape_id = body->get_shape_id(p_shape_index);
+	const int capacity = b3Shape_GetContactCapacity(shape_id);
+	if (capacity <= 0) {
+		return result;
+	}
+	LocalVector<b3ContactData> pairs;
+	pairs.resize(capacity);
+	const int count = b3Shape_GetContactData(shape_id, pairs.ptr(), capacity);
+	const b3Vec3 center = b3Body_GetWorldCenter(body->get_body_id());
+
+	for (int i = 0; i < count; i++) {
+		const b3ContactData& pair = pairs[i];
+		const bool self_is_a = B3_ID_EQUALS(pair.shapeIdA, shape_id);
+		const b3ShapeId other_shape = self_is_a ? pair.shapeIdB : pair.shapeIdA;
+		float impulse = 0.0f;
+		b3Vec3 point_sum = b3Vec3_zero;
+		b3Vec3 normal_sum = b3Vec3_zero;
+		for (int m = 0; m < pair.manifoldCount; m++) {
+			const b3Manifold& manifold = pair.manifolds[m];
+			// The manifold normal points from A to B: it pushes B along it and A against it.
+			const b3Vec3 push = self_is_a ? manifold.normal : b3Neg(manifold.normal);
+			for (int p = 0; p < manifold.pointCount; p++) {
+				const b3ManifoldPoint& point = manifold.points[p];
+				const float j = point.appliedNormalImpulse;
+				if (j <= 0.0f) {
+					continue;
+				}
+				impulse += j;
+				point_sum = b3MulAdd(point_sum, j, b3Add(center, self_is_a ? point.anchorA : point.anchorB));
+				normal_sum = b3MulAdd(normal_sum, j, push);
+			}
+		}
+		if (impulse <= 0.0f) {
+			continue;
+		}
+
+		const b3BodyId other_id = b3Shape_GetBody(other_shape);
+		// Areas share the userData slot as a sibling class, so a static_cast alone would yield garbage.
+		const auto* other = dynamic_cast<const Box3DBodyImpl3D*>(static_cast<Box3DShapedObjectImpl3D*>(b3Body_GetUserData(other_id)));
+		Dictionary entry;
+		entry["collider"] = other != nullptr ? other->get_rid() : RID();
+		entry["collider_id"] = other != nullptr ? (int64_t)other->get_instance_id() : (int64_t)0;
+		entry["collider_shape"] = other != nullptr ? other->find_shape_index(other_shape) : -1;
+		entry["impulse"] = impulse;
+		entry["point"] = b3_to_godot(b3MulSV(1.0f / impulse, point_sum));
+		entry["normal"] = b3_to_godot(b3Normalize(normal_sum));
+		result.push_back(entry);
+	}
+	return result;
+}
+
 int Box3DPhysicsDirectSpaceState3D::box3d_byte_count() {
 	return b3GetByteCount();
 }

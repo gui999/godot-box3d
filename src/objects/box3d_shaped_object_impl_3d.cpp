@@ -33,7 +33,8 @@ b3ShapeDef make_shape_def(
 		void* p_user_data,
 		float p_friction,
 		float p_restitution,
-		bool p_is_static) {
+		bool p_is_static,
+		float p_max_normal_impulse) {
 	b3ShapeDef def = b3DefaultShapeDef();
 	def.userData = p_user_data;
 	def.filter = godot_to_b3_filter(p_layer, p_mask);
@@ -50,6 +51,8 @@ b3ShapeDef make_shape_def(
 	// A static shape need not scan the broad phase when it is created: dynamic bodies find it
 	// when they move, which makes creating many static shapes cheap.
 	def.invokeContactCreation = !p_is_static;
+	// Terra: the attachment's normal impulse limit per step (FLT_MAX, the default, is none).
+	def.maxNormalImpulse = p_max_normal_impulse;
 	return def;
 }
 
@@ -74,7 +77,7 @@ b3ShapeId create_box3d_shape(
 	const PhysicsServer3D::ShapeType type = shape->get_type();
 	const bool is_concave = (type == PhysicsServer3D::SHAPE_CONCAVE_POLYGON || type == PhysicsServer3D::SHAPE_HEIGHTMAP);
 
-	b3ShapeDef def = make_shape_def(p_layer, p_mask, p_is_sensor, is_concave, nullptr, p_friction, p_restitution, p_is_static);
+	b3ShapeDef def = make_shape_def(p_layer, p_mask, p_is_sensor, is_concave, nullptr, p_friction, p_restitution, p_is_static, p_instance.get_max_normal_impulse());
 
 	const Transform3D& local = p_instance.get_transform();
 
@@ -310,6 +313,22 @@ void Box3DShapedObjectImpl3D::set_shape_transform(int32_t p_index, const Transfo
 		_create_shape_instance(instance);
 		_shapes_changed();
 	}
+}
+
+void Box3DShapedObjectImpl3D::set_shape_max_normal_impulse(int32_t p_index, float p_impulse) {
+	ERR_FAIL_INDEX(p_index, (int32_t)shapes.size());
+	ERR_FAIL_COND_MSG(!(p_impulse >= 0.0f), "Box3D: a shape's maximum normal impulse must be 0 or more (INF for no limit).");
+	Box3DShapeInstance3D& instance = shapes[p_index];
+	const float impulse = p_impulse < FLT_MAX ? p_impulse : FLT_MAX;
+	instance.set_max_normal_impulse(impulse);
+	if (instance.has_shape_id()) {
+		b3Shape_SetMaxNormalImpulse(instance.get_shape_id(), impulse);
+	}
+}
+
+float Box3DShapedObjectImpl3D::get_shape_max_normal_impulse(int32_t p_index) const {
+	ERR_FAIL_INDEX_V(p_index, (int32_t)shapes.size(), FLT_MAX);
+	return shapes[p_index].get_max_normal_impulse();
 }
 
 bool Box3DShapedObjectImpl3D::is_shape_disabled(int32_t p_index) const {
@@ -576,7 +595,7 @@ b3ShapeId Box3DShapedObjectImpl3D::_create_grid_shape(Box3DShapeInstance3D& p_in
 	release_modules();
 	ERR_FAIL_NULL_V_MSG(b3_grid, b3_nullShapeId, "Box3D: could not create the voxel grid.");
 
-	const b3ShapeDef def = make_shape_def(collision_layer, collision_mask, false, false, nullptr, _get_shape_friction(), _get_shape_restitution(), p_is_static);
+	const b3ShapeDef def = make_shape_def(collision_layer, collision_mask, false, false, nullptr, _get_shape_friction(), _get_shape_restitution(), p_is_static, p_instance.get_max_normal_impulse());
 	const b3ShapeId id = b3CreateVoxelGridShape(body_id, &def, b3_grid);
 	// The shape holds its own reference.
 	b3ReleaseVoxelGrid(b3_grid);

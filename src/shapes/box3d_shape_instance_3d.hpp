@@ -4,6 +4,8 @@
 
 #include <box3d/id.h>
 
+#include <cfloat>
+
 using namespace godot;
 
 typedef struct b3MeshData b3MeshData;
@@ -53,11 +55,18 @@ public:
 
 	void set_owned_mesh(b3MeshData* p_mesh) { owned_mesh = p_mesh; }
 
+	// Terra: the most normal impulse in N*s a contact of this attachment may apply over one step
+	// (b3ShapeDef::maxNormalImpulse; FLT_MAX is no limit). Kept here so every rebuild of the b3 shape takes it.
+	float get_max_normal_impulse() const { return max_normal_impulse; }
+
+	void set_max_normal_impulse(float p_impulse) { max_normal_impulse = p_impulse; }
+
 private:
 	Box3DShapeImpl3D* shape = nullptr;
 	Transform3D transform;
 	b3ShapeId shape_id = b3_nullShapeId;
 	b3MeshData* owned_mesh = nullptr;
 	uint32_t index = 0;
+	float max_normal_impulse = FLT_MAX;
 	bool disabled = false;
 };

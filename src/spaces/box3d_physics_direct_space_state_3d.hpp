@@ -4,6 +4,7 @@
 #include <godot_cpp/classes/physics_server3d_extension_motion_result.hpp>
 #include <godot_cpp/classes/physics_server3d_extension_shape_rest_info.hpp>
 #include <godot_cpp/classes/physics_server3d_extension_shape_result.hpp>
+#include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
@@ -107,6 +108,12 @@ public:
 	int box3d_byte_count();
 	Dictionary world_counters();
 	void prepare_voxel_modules(const PackedFloat32Array& p_boxes, const PackedInt32Array& p_box_offsets, float p_cell_meters, int p_cell_voxels);
+
+	// Terra's impulse cap (D604, Box3D branch terra-impulse-cap), bound for Call from C#; contracts in the .cpp.
+	void set_shape_max_normal_impulse(const RID& p_body, int p_shape_index, float p_impulse);
+	float get_shape_max_normal_impulse(const RID& p_body, int p_shape_index);
+	void set_limit_pass_through(bool p_enabled);
+	Array shape_contact_impulses(const RID& p_body, int p_shape_index);
 
 protected:
 	static void _bind_methods();

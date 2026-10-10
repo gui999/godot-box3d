@@ -53,6 +53,12 @@ public:
 
 	void set_shape_transform(int32_t p_index, const Transform3D& p_transform);
 
+	// Terra: the most normal impulse in N*s a contact of this attachment may apply over one step (D604); INF or
+	// FLT_MAX is no limit. It holds across rebuilds of the b3 shape. Between steps only (Box3D refuses a locked world).
+	void set_shape_max_normal_impulse(int32_t p_index, float p_impulse);
+
+	float get_shape_max_normal_impulse(int32_t p_index) const;
+
 	bool is_shape_disabled(int32_t p_index) const;
 
 	void set_shape_disabled(int32_t p_index, bool p_disabled);
