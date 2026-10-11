@@ -14,6 +14,9 @@ int box3d_worker_priority();
 
 // The physics/box3d/diagnostics setting (read once): per-step timing prints.
 bool box3d_diagnostics_enabled();
+
+// The physics/box3d/voxel_point_contacts setting, read when a space is created: point-sampled voxel grid pair contacts.
+bool box3d_voxel_point_contacts();
 float box3d_contact_hertz();
 float box3d_contact_damping_ratio();
 float box3d_contact_speed();

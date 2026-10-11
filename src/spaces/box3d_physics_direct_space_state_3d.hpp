@@ -113,6 +113,8 @@ public:
 	void set_shape_max_normal_impulse(const RID& p_body, int p_shape_index, float p_impulse);
 	float get_shape_max_normal_impulse(const RID& p_body, int p_shape_index);
 	void set_limit_pass_through(bool p_enabled);
+	void set_voxel_point_contacts(bool p_enabled);
+	bool is_voxel_point_contacts();
 	Array shape_contact_impulses(const RID& p_body, int p_shape_index);
 
 protected:

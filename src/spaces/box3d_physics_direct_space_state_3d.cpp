@@ -605,6 +605,8 @@ void Box3DPhysicsDirectSpaceState3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_shape_max_normal_impulse", "body", "shape_index", "impulse"), &Box3DPhysicsDirectSpaceState3D::set_shape_max_normal_impulse);
 	ClassDB::bind_method(D_METHOD("get_shape_max_normal_impulse", "body", "shape_index"), &Box3DPhysicsDirectSpaceState3D::get_shape_max_normal_impulse);
 	ClassDB::bind_method(D_METHOD("set_limit_pass_through", "enabled"), &Box3DPhysicsDirectSpaceState3D::set_limit_pass_through);
+	ClassDB::bind_method(D_METHOD("set_voxel_point_contacts", "enabled"), &Box3DPhysicsDirectSpaceState3D::set_voxel_point_contacts);
+	ClassDB::bind_method(D_METHOD("is_voxel_point_contacts"), &Box3DPhysicsDirectSpaceState3D::is_voxel_point_contacts);
 	ClassDB::bind_method(D_METHOD("shape_contact_impulses", "body", "shape_index"), &Box3DPhysicsDirectSpaceState3D::shape_contact_impulses);
 }
 
@@ -718,6 +720,18 @@ void Box3DPhysicsDirectSpaceState3D::set_limit_pass_through(bool p_enabled) {
 	b3World_EnableLimitPassThrough(space->get_world_id(), p_enabled);
 }
 
+// Terra: whether voxel grid against voxel grid contacts are point-sampled against occupancy (the project setting
+// physics/box3d/voxel_point_contacts gives the start value). Between steps only.
+void Box3DPhysicsDirectSpaceState3D::set_voxel_point_contacts(bool p_enabled) {
+	ERR_FAIL_NULL(space);
+	b3World_EnableVoxelPointContacts(space->get_world_id(), p_enabled);
+}
+
+bool Box3DPhysicsDirectSpaceState3D::is_voxel_point_contacts() {
+	ERR_FAIL_NULL_V(space, false);
+	return b3World_IsVoxelPointContactsEnabled(space->get_world_id());
+}
+
 // What each body touching the body's shape (its Godot shape index) took from it over the last step: one Dictionary per
 // touching shape pair that applied any normal impulse, with collider (RID), collider_id (the collider's instance id),
 // collider_shape (its Godot shape index), impulse (the net normal impulse in N*s over the step, sub-steps and
@@ -803,6 +817,10 @@ Dictionary Box3DPhysicsDirectSpaceState3D::world_counters() {
 	result["tree_height"] = c.treeHeight;
 	result["sat_call_count"] = c.satCallCount;
 	result["sat_cache_hit_count"] = c.satCacheHitCount;
+	result["voxel_grid_pair_count"] = c.voxelGridPairCount;
+	result["voxel_sample_count"] = c.voxelSampleCount;
+	result["voxel_point_count"] = c.voxelPointCount;
+	result["voxel_min_separation"] = c.voxelMinSeparation;
 	result["byte_count"] = c.byteCount;
 	result["task_count"] = c.taskCount;
 	PackedInt32Array color_counts;

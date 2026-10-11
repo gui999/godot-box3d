@@ -16,6 +16,8 @@ const char *WORKER_COUNT_SETTING = "physics/box3d/worker_count";
 // Terra: OS priority of Box3D's scheduler threads (normal, above_normal, highest, time_critical).
 const char *WORKER_PRIORITY_SETTING = "physics/box3d/worker_priority";
 const char *DIAGNOSTICS_SETTING = "physics/box3d/diagnostics";
+// Terra: point-sampled voxel grid against voxel grid contacts (b3World_EnableVoxelPointContacts).
+const char *VOXEL_POINT_CONTACTS_SETTING = "physics/box3d/voxel_point_contacts";
 // Terra: contact softness. Box3D pushes overlapping bodies apart at up to contact_speed, which on a
 // body of thousands of tonnes is an enormous impulse; Godot and Jolt recover gently.
 const char *CONTACT_HERTZ_SETTING = "physics/box3d/contact_hertz";
@@ -73,6 +75,15 @@ void box3d_initialize() {
 	diagnostics_info["type"] = Variant::BOOL;
 	settings->add_property_info(diagnostics_info);
 
+	if (!settings->has_setting(VOXEL_POINT_CONTACTS_SETTING)) {
+		settings->set_setting(VOXEL_POINT_CONTACTS_SETTING, false);
+	}
+	settings->set_initial_value(VOXEL_POINT_CONTACTS_SETTING, false);
+	Dictionary voxel_point_info;
+	voxel_point_info["name"] = VOXEL_POINT_CONTACTS_SETTING;
+	voxel_point_info["type"] = Variant::BOOL;
+	settings->add_property_info(voxel_point_info);
+
 	// Box3D's own defaults (b3DefaultWorldDef).
 	add_float_setting(settings, CONTACT_HERTZ_SETTING, 30.0, "1,240,0.1");
 	add_float_setting(settings, CONTACT_DAMPING_SETTING, 10.0, "0,100,0.1");
@@ -108,6 +119,10 @@ float box3d_contact_damping_ratio() {
 
 float box3d_contact_speed() {
 	return (float)(double)ProjectSettings::get_singleton()->get_setting_with_override(CONTACT_SPEED_SETTING);
+}
+
+bool box3d_voxel_point_contacts() {
+	return (bool)ProjectSettings::get_singleton()->get_setting_with_override(VOXEL_POINT_CONTACTS_SETTING);
 }
 
 bool box3d_diagnostics_enabled() {

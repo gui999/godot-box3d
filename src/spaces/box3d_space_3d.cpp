@@ -12,6 +12,7 @@
 
 #include <box3d/box3d.h>
 
+#include <cfloat>
 #include <chrono>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -28,6 +29,7 @@ Box3DSpace3D::Box3DSpace3D() {
 	def.contactDampingRatio = box3d_contact_damping_ratio();
 	def.contactSpeed = box3d_contact_speed();
 	world_id = b3CreateWorld(&def);
+	b3World_EnableVoxelPointContacts(world_id, box3d_voxel_point_contacts());
 
 	direct_state = memnew(Box3DPhysicsDirectSpaceState3D);
 	direct_state->set_space(this);
@@ -126,6 +128,8 @@ void Box3DSpace3D::step(float p_step) {
 	static double worst_step_ms = 0.0;
 	static b3Profile worst_profile = {};
 	static int worst_contacts = 0, worst_awake = 0;
+	static int worst_grid_pairs = 0, worst_samples = 0, worst_points = 0, worst_sat = 0;
+	static float worst_separation = 0.0f, least_separation = FLT_MAX;
 	if (box3d_diagnostics_enabled()) {
 		const double this_step = std::chrono::duration<double, std::milli>(t2 - t1).count();
 		if (this_step > worst_step_ms) {
@@ -134,7 +138,13 @@ void Box3DSpace3D::step(float p_step) {
 			const b3Counters counters = b3World_GetCounters(world_id);
 			worst_contacts = counters.contactCount;
 			worst_awake = counters.awakeContactCount;
+			worst_grid_pairs = counters.voxelGridPairCount;
+			worst_samples = counters.voxelSampleCount;
+			worst_points = counters.voxelPointCount;
+			worst_sat = counters.satCallCount;
+			worst_separation = counters.voxelMinSeparation;
 		}
+		least_separation = MIN(least_separation, b3World_GetCounters(world_id).voxelMinSeparation);
 	}
 	if (box3d_diagnostics_enabled() && ++diagnostic_steps % 60 == 0) {
 		int awake = 0, dynamic = 0;
@@ -156,6 +166,11 @@ void Box3DSpace3D::step(float p_step) {
 				diagnostic_steps, ms(t1 - t0), ms(t2 - t1), ms(t3 - t2), p.step, p.pairs, p.collide, p.solve, p.splitIslands, p.sleepIslands,
 				dynamic, awake, fastest, c.islandCount, c.contactCount, c.awakeContactCount, c.taskCount, box3d_worker_count(), (int)Box3DVoxelGridShapeImpl3D::get_live_shape_count(), worst_step_ms, worst_profile.pairs, worst_profile.collide, worst_profile.solve, worst_contacts, worst_awake,
 				worst_profile.solverSetup, worst_profile.constraints, worst_profile.transforms, worst_profile.splitIslands, worst_profile.refit, worst_profile.bullets, worst_profile.sleepIslands, worst_profile.sensors, worst_profile.hitEvents));
+		UtilityFunctions::print(vformat("BOX3D_VOXEL step=%d point_contacts=%s grid_pairs=%d samples=%d points=%d sat=%d min_sep=%.3f least_sep_60=%.3f worst_step[grid_pairs=%d samples=%d points=%d sat=%d min_sep=%.3f]",
+				diagnostic_steps, b3World_IsVoxelPointContactsEnabled(world_id) ? "on" : "off", c.voxelGridPairCount, c.voxelSampleCount, c.voxelPointCount, c.satCallCount,
+				c.voxelMinSeparation == FLT_MAX ? 0.0f : c.voxelMinSeparation, least_separation == FLT_MAX ? 0.0f : least_separation,
+				worst_grid_pairs, worst_samples, worst_points, worst_sat, worst_separation == FLT_MAX ? 0.0f : worst_separation));
+		least_separation = FLT_MAX;
 		worst_step_ms = 0.0;
 	}
 
