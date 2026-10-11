@@ -148,7 +148,7 @@ void Box3DSpace3D::step(float p_step) {
 	}
 	if (box3d_diagnostics_enabled() && ++diagnostic_steps % 60 == 0) {
 		int awake = 0, dynamic = 0;
-		float fastest = 0.0f;
+		float fastest = 0.0f, fastest_turn = 0.0f, fastest_rim = 0.0f;
 		for (Box3DBodyImpl3D* body : bodies) {
 			if (!body->has_body_id() || b3Body_GetType(body->get_body_id()) != b3_dynamicBody) {
 				continue;
@@ -157,6 +157,10 @@ void Box3DSpace3D::step(float p_step) {
 			if (b3Body_IsAwake(body->get_body_id())) {
 				awake++;
 				fastest = MAX(fastest, b3Length(b3Body_GetLinearVelocity(body->get_body_id())));
+				const float turn = b3Length(b3Body_GetAngularVelocity(body->get_body_id()));
+				fastest_turn = MAX(fastest_turn, turn);
+				const b3AABB box = b3Body_ComputeAABB(body->get_body_id());
+				fastest_rim = MAX(fastest_rim, turn * 0.5f * b3Length(b3Sub(box.upperBound, box.lowerBound)));
 			}
 		}
 		const b3Counters c = b3World_GetCounters(world_id);
@@ -166,8 +170,8 @@ void Box3DSpace3D::step(float p_step) {
 				diagnostic_steps, ms(t1 - t0), ms(t2 - t1), ms(t3 - t2), p.step, p.pairs, p.collide, p.solve, p.splitIslands, p.sleepIslands,
 				dynamic, awake, fastest, c.islandCount, c.contactCount, c.awakeContactCount, c.taskCount, box3d_worker_count(), (int)Box3DVoxelGridShapeImpl3D::get_live_shape_count(), worst_step_ms, worst_profile.pairs, worst_profile.collide, worst_profile.solve, worst_contacts, worst_awake,
 				worst_profile.solverSetup, worst_profile.constraints, worst_profile.transforms, worst_profile.splitIslands, worst_profile.refit, worst_profile.bullets, worst_profile.sleepIslands, worst_profile.sensors, worst_profile.hitEvents));
-		UtilityFunctions::print(vformat("BOX3D_VOXEL step=%d point_contacts=%s grid_pairs=%d samples=%d points=%d sat=%d min_sep=%.3f least_sep_60=%.3f worst_step[grid_pairs=%d samples=%d points=%d sat=%d min_sep=%.3f]",
-				diagnostic_steps, b3World_IsVoxelPointContactsEnabled(world_id) ? "on" : "off", c.voxelGridPairCount, c.voxelSampleCount, c.voxelPointCount, c.satCallCount,
+		UtilityFunctions::print(vformat("BOX3D_VOXEL step=%d turn=%.5f rim_speed=%.4f point_contacts=%s grid_pairs=%d samples=%d points=%d sat=%d min_sep=%.3f least_sep_60=%.3f worst_step[grid_pairs=%d samples=%d points=%d sat=%d min_sep=%.3f]",
+				diagnostic_steps, fastest_turn, fastest_rim, b3World_IsVoxelPointContactsEnabled(world_id) ? "on" : "off", c.voxelGridPairCount, c.voxelSampleCount, c.voxelPointCount, c.satCallCount,
 				c.voxelMinSeparation == FLT_MAX ? 0.0f : c.voxelMinSeparation, least_separation == FLT_MAX ? 0.0f : least_separation,
 				worst_grid_pairs, worst_samples, worst_points, worst_sat, worst_separation == FLT_MAX ? 0.0f : worst_separation));
 		least_separation = FLT_MAX;
