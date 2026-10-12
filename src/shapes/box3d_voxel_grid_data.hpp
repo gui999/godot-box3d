@@ -64,6 +64,8 @@ public:
 
 	// A module's boxes: r_count boxes of six floats (min xyz, max xyz) each.
 	const float* get_module_boxes(int32_t p_module, int& r_count) const;
+	const std::vector<float>& get_body_boxes() const { return body_boxes; }
+	const std::vector<uint8_t>& get_body_covered_faces() const { return body_covered_faces; }
 
 private:
 	bool valid = false;
@@ -74,4 +76,6 @@ private:
 	std::vector<int32_t> padded_cells;
 	std::vector<int32_t> box_offsets;
 	std::vector<float> boxes;
+	std::vector<float> body_boxes;
+	std::vector<uint8_t> body_covered_faces;
 };

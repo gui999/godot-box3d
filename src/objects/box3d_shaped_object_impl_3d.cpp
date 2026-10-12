@@ -594,6 +594,36 @@ b3ShapeId Box3DShapedObjectImpl3D::_create_grid_shape(Box3DShapeInstance3D& p_in
 	b3VoxelGrid* b3_grid = b3CreateVoxelGrid(&grid_def);
 	release_modules();
 	ERR_FAIL_NULL_V_MSG(b3_grid, b3_nullShapeId, "Box3D: could not create the voxel grid.");
+	if (!data.get_body_boxes().empty()) {
+		// One geometry page spans the whole body; contacts still read its exact occupancy grid.
+		const auto& boxes = data.get_body_boxes();
+		const int count = (int)boxes.size() / 6;
+		const float extent = data.get_cell_size() * std::max(size.x, std::max(size.y, size.z));
+		b3VoxelGridModule* merged = b3CreateVoxelGridModule(boxes.data(), count, extent, cell_voxels);
+		if (merged == nullptr) {
+			b3ReleaseVoxelGrid(b3_grid);
+			ERR_FAIL_V_MSG(b3_nullShapeId, "Box3D: invalid merged body boxes.");
+		}
+		b3VoxelGridModule_SetCoveredFaces(merged, data.get_body_covered_faces().data(), count);
+		int padded[27];
+		std::fill(padded, padded + 27, -1);
+		padded[13] = 0;
+		b3VoxelGridDef merged_def = {};
+		merged_def.cellCountX = merged_def.cellCountY = merged_def.cellCountZ = 1;
+		merged_def.origin = grid_def.origin;
+		merged_def.cellMeters = extent;
+		merged_def.cellVoxels = cell_voxels;
+		merged_def.maxBoxesPerCell = count;
+		merged_def.modules = &merged;
+		merged_def.moduleCount = 1;
+		merged_def.paddedCells = padded;
+		merged_def.occupancy = b3_grid;
+		b3VoxelGrid* collision = b3CreateVoxelGrid(&merged_def);
+		b3ReleaseVoxelGridModule(merged);
+		b3ReleaseVoxelGrid(b3_grid);
+		ERR_FAIL_NULL_V_MSG(collision, b3_nullShapeId, "Box3D: could not create merged body collision.");
+		b3_grid = collision;
+	}
 
 	const b3ShapeDef def = make_shape_def(collision_layer, collision_mask, false, false, nullptr, _get_shape_friction(), _get_shape_restitution(), p_is_static, p_instance.get_max_normal_impulse());
 	const b3ShapeId id = b3CreateVoxelGridShape(body_id, &def, b3_grid);

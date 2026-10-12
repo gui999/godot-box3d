@@ -806,6 +806,7 @@ Dictionary Box3DPhysicsDirectSpaceState3D::world_counters() {
 	Dictionary result;
 	ERR_FAIL_NULL_V(space, result);
 	const b3Counters c = b3World_GetCounters(space->get_world_id());
+	result["physics_step_ms"] = b3World_GetProfile(space->get_world_id()).step;
 	result["body_count"] = c.bodyCount;
 	result["shape_count"] = c.shapeCount;
 	result["contact_count"] = c.contactCount;

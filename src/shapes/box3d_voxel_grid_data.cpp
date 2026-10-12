@@ -2,10 +2,12 @@
 
 #include <godot_cpp/core/error_macros.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/variant.hpp>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 
@@ -48,6 +50,23 @@ bool Box3DVoxelGridData::set(const Dictionary& p_data) {
 		ERR_FAIL_COND_V_MSG(cells[i] < -1 || cells[i] >= module_count, false, "A voxel grid shape's cell names a module it does not have.");
 	}
 
+	PackedFloat32Array merged;
+	PackedByteArray covered;
+	if (p_data.has("body_boxes")) {
+		ERR_FAIL_COND_V(p_data["body_boxes"].get_type() != Variant::PACKED_FLOAT32_ARRAY, false);
+		ERR_FAIL_COND_V(p_data.get("body_covered_faces", Variant()).get_type() != Variant::PACKED_BYTE_ARRAY, false);
+		merged = p_data["body_boxes"];
+		covered = p_data["body_covered_faces"];
+		ERR_FAIL_COND_V(merged.size() == 0 || merged.size() % 6 != 0 || covered.size() != merged.size() / 6, false);
+		for (int64_t b = 0; b < merged.size(); b += 6) {
+			for (int a = 0; a < 3; a++) {
+				ERR_FAIL_COND_V(!std::isfinite(merged[b + a]) || !std::isfinite(merged[b + 3 + a]) || merged[b + a] < 0 || merged[b + 3 + a] > new_size[a] * new_cell_size + 0.001f || merged[b + 3 + a] <= merged[b + a], false);
+			}
+			ERR_FAIL_COND_V(covered[b / 6] > 63, false);
+		}
+	}
+	body_boxes = to_vector<PackedFloat32Array, float>(merged);
+	body_covered_faces = to_vector<PackedByteArray, uint8_t>(covered);
 	cell_size = new_cell_size;
 	cell_voxels = new_cell_voxels;
 	size = new_size;
@@ -62,6 +81,7 @@ bool Box3DVoxelGridData::set(const Dictionary& p_data) {
 bool Box3DVoxelGridData::update(const Dictionary& p_update, std::vector<int32_t>& r_changed_cells) {
 	r_changed_cells.clear();
 	ERR_FAIL_COND_V_MSG(!valid, false, "A voxel grid shape's cells can only be updated once it has a grid.");
+	ERR_FAIL_COND_V_MSG(!body_boxes.empty(), false, "A merged body replaces its complete voxel snapshot, not individual world cells.");
 	ERR_FAIL_COND_V(p_update.get("update", Variant()).get_type() != Variant::PACKED_INT32_ARRAY, false);
 	ERR_FAIL_COND_V(p_update.get("box_offsets", Variant()).get_type() != Variant::PACKED_INT32_ARRAY, false);
 	ERR_FAIL_COND_V(p_update.get("boxes", Variant()).get_type() != Variant::PACKED_FLOAT32_ARRAY, false);
@@ -127,6 +147,16 @@ Dictionary Box3DVoxelGridData::to_dictionary() const {
 	data["cells"] = cells;
 	data["box_offsets"] = offsets;
 	data["boxes"] = box_array;
+	if (!body_boxes.empty()) {
+		PackedFloat32Array merged;
+		merged.resize((int64_t)body_boxes.size());
+		memcpy(merged.ptrw(), body_boxes.data(), body_boxes.size() * sizeof(float));
+		PackedByteArray covered;
+		covered.resize((int64_t)body_covered_faces.size());
+		memcpy(covered.ptrw(), body_covered_faces.data(), body_covered_faces.size());
+		data["body_boxes"] = merged;
+		data["body_covered_faces"] = covered;
+	}
 	return data;
 }
 
