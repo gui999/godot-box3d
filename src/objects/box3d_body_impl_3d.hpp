@@ -46,6 +46,10 @@ public:
 
 	void set_mode(BodyMode p_mode);
 
+	void set_max_normal_impulse(float p_impulse);
+
+	float get_max_normal_impulse() const;
+
 	// Godot semantics: mass is always the explicitly set value (default 1.0), never
 	// derived from shape volume like native Box3D.
 	real_t get_mass() const { return mass; }
@@ -215,6 +219,7 @@ private:
 	void _refresh_mass_data();
 
 	BodyMode mode = PhysicsServer3D::BODY_MODE_RIGID;
+	float max_normal_impulse = FLT_MAX;
 	bool kinematic_moved = false;
 	bool mass_dirty = false;
 

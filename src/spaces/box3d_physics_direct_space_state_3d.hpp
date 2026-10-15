@@ -112,6 +112,8 @@ public:
 	// Terra's impulse cap (D604, Box3D branch terra-impulse-cap), bound for Call from C#; contracts in the .cpp.
 	void set_shape_max_normal_impulse(const RID& p_body, int p_shape_index, float p_impulse);
 	float get_shape_max_normal_impulse(const RID& p_body, int p_shape_index);
+	void set_body_max_normal_impulse(const RID& p_body, float p_impulse);
+	float get_body_max_normal_impulse(const RID& p_body);
 	void set_limit_pass_through(bool p_enabled);
 	void set_voxel_point_contacts(bool p_enabled);
 	bool is_voxel_point_contacts();

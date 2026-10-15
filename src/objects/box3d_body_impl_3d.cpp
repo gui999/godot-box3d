@@ -62,7 +62,21 @@ b3BodyId Box3DBodyImpl3D::_create_body_id(b3WorldId p_world_id) {
 
 	// Mass data is not applied here: shape creation right after (rebuild_shapes) makes
 	// Box3D recompute it from shape density, so _shapes_changed() re-applies it then.
-	return b3CreateBody(p_world_id, &def);
+	const b3BodyId created = b3CreateBody(p_world_id, &def);
+	b3Body_SetMaxNormalImpulse(created, max_normal_impulse);
+	return created;
+}
+
+void Box3DBodyImpl3D::set_max_normal_impulse(float p_impulse) {
+	ERR_FAIL_COND_MSG(!(p_impulse >= 0.0f), "Box3D: a body's maximum normal impulse must be 0 or more (INF for no limit).");
+	max_normal_impulse = p_impulse < FLT_MAX ? p_impulse : FLT_MAX;
+	if (has_body_id()) {
+		b3Body_SetMaxNormalImpulse(body_id, max_normal_impulse);
+	}
+}
+
+float Box3DBodyImpl3D::get_max_normal_impulse() const {
+	return has_body_id() ? b3Body_GetMaxNormalImpulse(body_id) : max_normal_impulse;
 }
 
 void Box3DBodyImpl3D::set_mode(BodyMode p_mode) {

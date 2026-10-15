@@ -604,6 +604,8 @@ void Box3DPhysicsDirectSpaceState3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("prepare_voxel_modules", "boxes", "box_offsets", "cell_meters", "cell_voxels"), &Box3DPhysicsDirectSpaceState3D::prepare_voxel_modules);
 	ClassDB::bind_method(D_METHOD("set_shape_max_normal_impulse", "body", "shape_index", "impulse"), &Box3DPhysicsDirectSpaceState3D::set_shape_max_normal_impulse);
 	ClassDB::bind_method(D_METHOD("get_shape_max_normal_impulse", "body", "shape_index"), &Box3DPhysicsDirectSpaceState3D::get_shape_max_normal_impulse);
+	ClassDB::bind_method(D_METHOD("set_body_max_normal_impulse", "body", "impulse"), &Box3DPhysicsDirectSpaceState3D::set_body_max_normal_impulse);
+	ClassDB::bind_method(D_METHOD("get_body_max_normal_impulse", "body"), &Box3DPhysicsDirectSpaceState3D::get_body_max_normal_impulse);
 	ClassDB::bind_method(D_METHOD("set_limit_pass_through", "enabled"), &Box3DPhysicsDirectSpaceState3D::set_limit_pass_through);
 	ClassDB::bind_method(D_METHOD("set_voxel_point_contacts", "enabled"), &Box3DPhysicsDirectSpaceState3D::set_voxel_point_contacts);
 	ClassDB::bind_method(D_METHOD("is_voxel_point_contacts"), &Box3DPhysicsDirectSpaceState3D::is_voxel_point_contacts);
@@ -711,6 +713,21 @@ float Box3DPhysicsDirectSpaceState3D::get_shape_max_normal_impulse(const RID& p_
 	Box3DBodyImpl3D* body = Box3DPhysicsServer3D::get_singleton()->get_body(p_body);
 	ERR_FAIL_NULL_V_MSG(body, FLT_MAX, "Box3D get_shape_max_normal_impulse: the RID is not a body.");
 	return body->get_shape_max_normal_impulse(p_shape_index);
+}
+
+// Terra: one static target body's allowance, shared across all of its scalar-path shape contacts with each opposing
+// body over one step (sub-steps and restitution included). Each opposing body receives the whole allowance independently.
+// INF removes the limit. The body retains it across shape rebuilds and space reattachment. Set between steps only.
+void Box3DPhysicsDirectSpaceState3D::set_body_max_normal_impulse(const RID& p_body, float p_impulse) {
+	Box3DBodyImpl3D* body = Box3DPhysicsServer3D::get_singleton()->get_body(p_body);
+	ERR_FAIL_NULL_MSG(body, "Box3D set_body_max_normal_impulse: the RID is not a body.");
+	body->set_max_normal_impulse(p_impulse);
+}
+
+float Box3DPhysicsDirectSpaceState3D::get_body_max_normal_impulse(const RID& p_body) {
+	Box3DBodyImpl3D* body = Box3DPhysicsServer3D::get_singleton()->get_body(p_body);
+	ERR_FAIL_NULL_V_MSG(body, FLT_MAX, "Box3D get_body_max_normal_impulse: the RID is not a body.");
+	return body->get_max_normal_impulse();
 }
 
 // Whether continuous collision passes a shape whose limit gave way this step, so a fast body carries on through what it
