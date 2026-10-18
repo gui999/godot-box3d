@@ -659,11 +659,11 @@ b3ShapeId Box3DShapedObjectImpl3D::_create_grid_shape(Box3DShapeInstance3D& p_in
 b3VoxelGridModule* Box3DShapedObjectImpl3D::_make_region_module(const Box3DVoxelGridData& p_data, int p_region) {
 	const std::vector<float>& boxes = p_data.get_region_boxes(p_region);
 	const int count = (int)boxes.size() / 6;
-	b3VoxelGridModule* module = b3CreateVoxelGridModule(count > 0 ? boxes.data() : nullptr, count, p_data.get_body_region_meters(), p_data.get_cell_voxels());
+	// From the module cache: a body that leaves the space and returns (its plot out of reach and back) rebuilt every
+	// region's module each time, 70-94 ms for the tall building's tower (S3).
+	b3VoxelGridModule* module = Box3DVoxelModuleCache::acquire_region(boxes.data(), p_data.get_region_covered_faces(p_region).data(), count,
+			p_data.get_body_region_meters(), p_data.get_cell_voxels());
 	ERR_FAIL_NULL_V_MSG(module, nullptr, "Box3D: invalid merged body region boxes.");
-	if (count > 0) {
-		b3VoxelGridModule_SetCoveredFaces(module, p_data.get_region_covered_faces(p_region).data(), count);
-	}
 	return module;
 }
 

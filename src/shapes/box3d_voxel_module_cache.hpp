@@ -13,4 +13,8 @@ public:
 	// Degenerate boxes are skipped. Never null: a set of boxes Box3D refuses gives an empty module and a
 	// printed error. Thread safe: modules may be acquired ahead of time on a worker thread.
 	static b3VoxelGridModule* acquire(const float* p_boxes, int p_box_count, float p_cell_meters, int p_cell_voxels);
+	// A merged body's region module (D755) with the caller's covered faces, from the cache or derived now: a body
+	// that leaves the space and returns (its plot out of reach and back) finds its regions as they were. Boxes are
+	// kept as given (the faces index them). Null when Box3D refuses the boxes. The caller owns one reference.
+	static b3VoxelGridModule* acquire_region(const float* p_boxes, const uint8_t* p_faces, int p_box_count, float p_cell_meters, int p_cell_voxels);
 };

@@ -17,6 +17,9 @@ struct CacheEntry {
 	b3VoxelGridModule* module = nullptr;
 	float cell_meters = 0.0f;
 	int cell_voxels = 0;
+	// A merged body's region module (D755) carries the caller's covered faces; an ordinary module derives its own.
+	bool region = false;
+	std::vector<uint8_t> faces;
 };
 
 std::mutex cache_mutex;
@@ -42,7 +45,7 @@ b3VoxelGridModule* find(uint64_t p_hash, const float* p_boxes, int p_box_count, 
 	auto range = cache.equal_range(p_hash);
 	for (auto it = range.first; it != range.second; ++it) {
 		const CacheEntry& entry = it->second;
-		if (entry.cell_meters == p_cell_meters && entry.cell_voxels == p_cell_voxels && b3VoxelGridModule_GetBoxCount(entry.module) == p_box_count &&
+		if (!entry.region && entry.cell_meters == p_cell_meters && entry.cell_voxels == p_cell_voxels && b3VoxelGridModule_GetBoxCount(entry.module) == p_box_count &&
 				(p_box_count == 0 || std::memcmp(b3VoxelGridModule_GetBoxes(entry.module), p_boxes, (size_t)p_box_count * 6 * sizeof(float)) == 0)) {
 			b3RetainVoxelGridModule(entry.module);
 			return entry.module;
@@ -111,5 +114,67 @@ b3VoxelGridModule* Box3DVoxelModuleCache::acquire(const float* p_boxes, int p_bo
 	}
 	b3RetainVoxelGridModule(module);
 	cache.emplace(hash, CacheEntry{ module, p_cell_meters, p_cell_voxels });
+	return module;
+}
+
+namespace {
+
+// Word-wise FNV-1a: a region's boxes are megabytes, and the byte-wise mix above cost as much as a module build.
+uint64_t hash_words(uint64_t p_hash, const void* p_bytes, size_t p_size) {
+	const uint8_t* bytes = static_cast<const uint8_t*>(p_bytes);
+	size_t i = 0;
+	for (; i + 8 <= p_size; i += 8) {
+		uint64_t word;
+		std::memcpy(&word, bytes + i, 8);
+		p_hash = (p_hash ^ word) * 1099511628211ull;
+	}
+	for (; i < p_size; i++) {
+		p_hash = (p_hash ^ bytes[i]) * 1099511628211ull;
+	}
+	return p_hash;
+}
+
+b3VoxelGridModule* find_region(uint64_t p_hash, const float* p_boxes, const uint8_t* p_faces, int p_box_count, float p_cell_meters, int p_cell_voxels) {
+	auto range = cache.equal_range(p_hash);
+	for (auto it = range.first; it != range.second; ++it) {
+		const CacheEntry& entry = it->second;
+		if (entry.region && entry.cell_meters == p_cell_meters && entry.cell_voxels == p_cell_voxels && b3VoxelGridModule_GetBoxCount(entry.module) == p_box_count &&
+				(p_box_count == 0 || (std::memcmp(b3VoxelGridModule_GetBoxes(entry.module), p_boxes, (size_t)p_box_count * 6 * sizeof(float)) == 0 &&
+						std::memcmp(entry.faces.data(), p_faces, (size_t)p_box_count) == 0))) {
+			b3RetainVoxelGridModule(entry.module);
+			return entry.module;
+		}
+	}
+	return nullptr;
+}
+
+} // namespace
+
+b3VoxelGridModule* Box3DVoxelModuleCache::acquire_region(const float* p_boxes, const uint8_t* p_faces, int p_box_count, float p_cell_meters, int p_cell_voxels) {
+	uint64_t hash = hash_words(14695981039346656037ull ^ 0x5245474Eull, &p_cell_meters, sizeof(float));
+	hash = hash_words(hash, &p_cell_voxels, sizeof(int));
+	hash = hash_words(hash, p_boxes, (size_t)p_box_count * 6 * sizeof(float));
+	hash = hash_words(hash, p_faces, (size_t)p_box_count);
+	{
+		std::lock_guard<std::mutex> lock(cache_mutex);
+		if (b3VoxelGridModule* cached = find_region(hash, p_boxes, p_faces, p_box_count, p_cell_meters, p_cell_voxels)) {
+			return cached;
+		}
+	}
+	b3VoxelGridModule* module = b3CreateVoxelGridModule(p_box_count > 0 ? p_boxes : nullptr, p_box_count, p_cell_meters, p_cell_voxels);
+	if (module == nullptr) {
+		return nullptr;
+	}
+	if (p_box_count > 0) {
+		b3VoxelGridModule_SetCoveredFaces(module, p_faces, p_box_count);
+	}
+	std::lock_guard<std::mutex> lock(cache_mutex);
+	if (b3VoxelGridModule* cached = find_region(hash, p_boxes, p_faces, p_box_count, p_cell_meters, p_cell_voxels)) {
+		b3ReleaseVoxelGridModule(module);
+		return cached;
+	}
+	b3RetainVoxelGridModule(module);
+	CacheEntry entry{ module, p_cell_meters, p_cell_voxels, true, std::vector<uint8_t>(p_faces, p_faces + std::max(p_box_count, 0)) };
+	cache.emplace(hash, std::move(entry));
 	return module;
 }
