@@ -95,6 +95,8 @@ private:
 	std::vector<std::vector<uint8_t>> region_covered_faces;
 	std::vector<int32_t> changed_regions;
 
-	// Parses p_region_count regions of p_data into r_boxes and r_covered.
-	bool parse_regions(const Dictionary& p_data, int p_region_count, std::vector<std::vector<float>>& r_boxes, std::vector<std::vector<uint8_t>>& r_covered) const;
+	// Parses p_region_count regions of p_data into r_boxes and r_covered: all regions in order, or those p_regions names.
+	// A region's boxes must lie in the part of it the grid covers (an edge region is cut by the grid's extent).
+	bool parse_regions(const Dictionary& p_data, int p_region_count, const std::vector<int32_t>* p_regions, std::vector<std::vector<float>>& r_boxes,
+			std::vector<std::vector<uint8_t>>& r_covered) const;
 };

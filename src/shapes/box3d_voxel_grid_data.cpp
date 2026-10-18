@@ -62,8 +62,10 @@ bool Box3DVoxelGridData::set(const Dictionary& p_data) {
 				(new_size.z + new_region_cells - 1) / new_region_cells);
 		Box3DVoxelGridData parsing;
 		parsing.cell_size = new_cell_size;
+		parsing.size = new_size;
 		parsing.body_region_cells = new_region_cells;
-		if (!parsing.parse_regions(p_data, new_region_size.x * new_region_size.y * new_region_size.z, new_region_boxes, new_region_covered)) {
+		parsing.body_region_size = new_region_size;
+		if (!parsing.parse_regions(p_data, new_region_size.x * new_region_size.y * new_region_size.z, nullptr, new_region_boxes, new_region_covered)) {
 			return false;
 		}
 	}
@@ -116,7 +118,7 @@ bool Box3DVoxelGridData::update(const Dictionary& p_update, std::vector<int32_t>
 			ERR_FAIL_COND_V_MSG(named[r] < 0 || named[r] >= get_body_region_count(), false, "A merged body's update names a region it does not have.");
 			regions.push_back(named[r]);
 		}
-		if (!parse_regions(p_update, (int)regions.size(), replaced_boxes, replaced_covered)) {
+		if (!parse_regions(p_update, (int)regions.size(), &regions, replaced_boxes, replaced_covered)) {
 			return false;
 		}
 	}
@@ -145,8 +147,8 @@ bool Box3DVoxelGridData::update(const Dictionary& p_update, std::vector<int32_t>
 	return true;
 }
 
-bool Box3DVoxelGridData::parse_regions(const Dictionary& p_data, int p_region_count, std::vector<std::vector<float>>& r_boxes,
-		std::vector<std::vector<uint8_t>>& r_covered) const {
+bool Box3DVoxelGridData::parse_regions(const Dictionary& p_data, int p_region_count, const std::vector<int32_t>* p_regions,
+		std::vector<std::vector<float>>& r_boxes, std::vector<std::vector<uint8_t>>& r_covered) const {
 	ERR_FAIL_COND_V(p_data.get("body_region_offsets", Variant()).get_type() != Variant::PACKED_INT32_ARRAY, false);
 	ERR_FAIL_COND_V(p_data.get("body_region_boxes", Variant()).get_type() != Variant::PACKED_FLOAT32_ARRAY, false);
 	ERR_FAIL_COND_V(p_data.get("body_region_covered_faces", Variant()).get_type() != Variant::PACKED_BYTE_ARRAY, false);
@@ -156,16 +158,20 @@ bool Box3DVoxelGridData::parse_regions(const Dictionary& p_data, int p_region_co
 	ERR_FAIL_COND_V_MSG(offsets.size() != (int64_t)p_region_count + 1 || offsets[0] != 0 || (int64_t)offsets[p_region_count] * 6 != boxes_in.size()
 					|| covered.size() != boxes_in.size() / 6,
 			false, "A merged body's region offsets must start at 0, give one offset a region and end at the box count, with a cover mask a box.");
-	const float extent = get_body_region_meters() + 0.001f;
+	const float region_meters = get_body_region_meters();
 	r_boxes.assign((size_t)p_region_count, {});
 	r_covered.assign((size_t)p_region_count, {});
 	for (int r = 0; r < p_region_count; r++) {
 		ERR_FAIL_COND_V_MSG(offsets[r + 1] < offsets[r], false, "A merged body's region offsets must not decrease.");
+		// The region's corner, in regions, from its index ((j * regions z + k) * regions x + i).
+		const int index = p_regions != nullptr ? (*p_regions)[(size_t)r] : r;
+		const int corner[3] = { index % body_region_size.x, index / (body_region_size.x * body_region_size.z), index / body_region_size.x % body_region_size.z };
 		for (int32_t b = offsets[r]; b < offsets[r + 1]; b++) {
 			for (int a = 0; a < 3; a++) {
+				const float extent = std::min(region_meters, size[a] * cell_size - corner[a] * region_meters) + 0.001f;
 				const float low = boxes_in[(int64_t)b * 6 + a], high = boxes_in[(int64_t)b * 6 + 3 + a];
 				ERR_FAIL_COND_V_MSG(!std::isfinite(low) || !std::isfinite(high) || low < -0.001f || high > extent || high <= low, false,
-						"A merged body's region box must lie in its region.");
+						"A merged body's region box must lie in the part of its region the grid covers.");
 			}
 			ERR_FAIL_COND_V(covered[b] > 63, false);
 		}
