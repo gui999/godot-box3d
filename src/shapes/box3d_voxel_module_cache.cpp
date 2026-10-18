@@ -54,6 +54,34 @@ b3VoxelGridModule* find(uint64_t p_hash, const float* p_boxes, int p_box_count, 
 	return nullptr;
 }
 
+// Modules no grid holds any more (hole-carved cells replaced since, a merged body's regions after it left) leave
+// the cache when it grows; every insert, ordinary or region, checks. Call with the lock held.
+void sweep_if_grown() {
+	if (cache.size() < cache_sweep_at) {
+		return;
+	}
+	// Only this cache holds them (it retains under the lock, so none can be taken meanwhile); they are
+	// freed on a thread of their own: terrain grids make tens of thousands of distinct modules, and
+	// freeing a streamed-out region's at once held the thread that made the next grid 10–110 ms.
+	std::vector<b3VoxelGridModule*> dead;
+	for (auto it = cache.begin(); it != cache.end();) {
+		if (b3VoxelGridModule_GetReferenceCount(it->second.module) == 1) {
+			dead.push_back(it->second.module);
+			it = cache.erase(it);
+		} else {
+			++it;
+		}
+	}
+	if (!dead.empty()) {
+		std::thread([dead = std::move(dead)]() {
+			for (b3VoxelGridModule* module : dead) {
+				b3ReleaseVoxelGridModule(module);
+			}
+		}).detach();
+	}
+	cache_sweep_at = std::max<size_t>(4096, cache.size() * 2);
+}
+
 } // namespace
 
 b3VoxelGridModule* Box3DVoxelModuleCache::acquire(const float* p_boxes, int p_box_count, float p_cell_meters, int p_cell_voxels) {
@@ -89,29 +117,7 @@ b3VoxelGridModule* Box3DVoxelModuleCache::acquire(const float* p_boxes, int p_bo
 		b3ReleaseVoxelGridModule(module);
 		return cached;
 	}
-	// Modules no grid holds any more (hole-carved cells replaced since) leave the cache when it grows.
-	if (cache.size() >= cache_sweep_at) {
-		// Only this cache holds them (it retains under the lock, so none can be taken meanwhile); they are
-		// freed on a thread of their own: terrain grids make tens of thousands of distinct modules, and
-		// freeing a streamed-out region's at once held the thread that made the next grid 10–110 ms.
-		std::vector<b3VoxelGridModule*> dead;
-		for (auto it = cache.begin(); it != cache.end();) {
-			if (b3VoxelGridModule_GetReferenceCount(it->second.module) == 1) {
-				dead.push_back(it->second.module);
-				it = cache.erase(it);
-			} else {
-				++it;
-			}
-		}
-		if (!dead.empty()) {
-			std::thread([dead = std::move(dead)]() {
-				for (b3VoxelGridModule* module : dead) {
-					b3ReleaseVoxelGridModule(module);
-				}
-			}).detach();
-		}
-		cache_sweep_at = std::max<size_t>(4096, cache.size() * 2);
-	}
+	sweep_if_grown();
 	b3RetainVoxelGridModule(module);
 	cache.emplace(hash, CacheEntry{ module, p_cell_meters, p_cell_voxels });
 	return module;
@@ -173,6 +179,7 @@ b3VoxelGridModule* Box3DVoxelModuleCache::acquire_region(const float* p_boxes, c
 		b3ReleaseVoxelGridModule(module);
 		return cached;
 	}
+	sweep_if_grown();
 	b3RetainVoxelGridModule(module);
 	CacheEntry entry{ module, p_cell_meters, p_cell_voxels, true, std::vector<uint8_t>(p_faces, p_faces + std::max(p_box_count, 0)) };
 	cache.emplace(hash, std::move(entry));
