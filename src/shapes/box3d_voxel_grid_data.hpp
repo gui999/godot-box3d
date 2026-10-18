@@ -18,6 +18,11 @@ using namespace godot;
 // only for face cover and never collidable), box_offsets, boxes (six floats a box: min xyz, max xyz in
 // metres in the cell's frame); an update dictionary carries `update` (padded cell, module) pairs plus
 // the box_offsets/boxes of modules appended to the table.
+// A merged body (Terra, D755) adds its collision boxes merged across pages, in regions of body_region_cells cells a side:
+// body_region_offsets (one box offset a region, regions in (j * regions z + k) * regions x + i order, the region count
+// plus one), body_region_boxes (six floats a box in its region's frame) and body_region_covered_faces (a mask a box).
+// The cells then only give the exact occupancy. Its update dictionary may carry, beside the cells' update, body_regions
+// (the regions it replaces) with their body_region_offsets, body_region_boxes and body_region_covered_faces.
 class Box3DVoxelGridData {
 public:
 	bool is_valid() const { return valid; }
@@ -64,8 +69,16 @@ public:
 
 	// A module's boxes: r_count boxes of six floats (min xyz, max xyz) each.
 	const float* get_module_boxes(int32_t p_module, int& r_count) const;
-	const std::vector<float>& get_body_boxes() const { return body_boxes; }
-	const std::vector<uint8_t>& get_body_covered_faces() const { return body_covered_faces; }
+	// A merged body's regions (none when the grid is not a merged body).
+	bool is_merged_body() const { return body_region_cells > 0; }
+	int get_body_region_cells() const { return body_region_cells; }
+	float get_body_region_meters() const { return body_region_cells * cell_size; }
+	Vector3i get_body_region_size() const { return body_region_size; }
+	int get_body_region_count() const { return (int)region_boxes.size(); }
+	const std::vector<float>& get_region_boxes(int p_region) const { return region_boxes[(size_t)p_region]; }
+	const std::vector<uint8_t>& get_region_covered_faces(int p_region) const { return region_covered_faces[(size_t)p_region]; }
+	// The regions the last update replaced.
+	const std::vector<int32_t>& get_changed_regions() const { return changed_regions; }
 
 private:
 	bool valid = false;
@@ -76,6 +89,12 @@ private:
 	std::vector<int32_t> padded_cells;
 	std::vector<int32_t> box_offsets;
 	std::vector<float> boxes;
-	std::vector<float> body_boxes;
-	std::vector<uint8_t> body_covered_faces;
+	int body_region_cells = 0;
+	Vector3i body_region_size;
+	std::vector<std::vector<float>> region_boxes;
+	std::vector<std::vector<uint8_t>> region_covered_faces;
+	std::vector<int32_t> changed_regions;
+
+	// Parses p_region_count regions of p_data into r_boxes and r_covered.
+	bool parse_regions(const Dictionary& p_data, int p_region_count, std::vector<std::vector<float>>& r_boxes, std::vector<std::vector<uint8_t>>& r_covered) const;
 };

@@ -50,23 +50,28 @@ bool Box3DVoxelGridData::set(const Dictionary& p_data) {
 		ERR_FAIL_COND_V_MSG(cells[i] < -1 || cells[i] >= module_count, false, "A voxel grid shape's cell names a module it does not have.");
 	}
 
-	PackedFloat32Array merged;
-	PackedByteArray covered;
-	if (p_data.has("body_boxes")) {
-		ERR_FAIL_COND_V(p_data["body_boxes"].get_type() != Variant::PACKED_FLOAT32_ARRAY, false);
-		ERR_FAIL_COND_V(p_data.get("body_covered_faces", Variant()).get_type() != Variant::PACKED_BYTE_ARRAY, false);
-		merged = p_data["body_boxes"];
-		covered = p_data["body_covered_faces"];
-		ERR_FAIL_COND_V(merged.size() == 0 || merged.size() % 6 != 0 || covered.size() != merged.size() / 6, false);
-		for (int64_t b = 0; b < merged.size(); b += 6) {
-			for (int a = 0; a < 3; a++) {
-				ERR_FAIL_COND_V(!std::isfinite(merged[b + a]) || !std::isfinite(merged[b + 3 + a]) || merged[b + a] < 0 || merged[b + 3 + a] > new_size[a] * new_cell_size + 0.001f || merged[b + 3 + a] <= merged[b + a], false);
-			}
-			ERR_FAIL_COND_V(covered[b / 6] > 63, false);
+	int new_region_cells = 0;
+	Vector3i new_region_size;
+	std::vector<std::vector<float>> new_region_boxes;
+	std::vector<std::vector<uint8_t>> new_region_covered;
+	if (p_data.has("body_region_cells")) {
+		ERR_FAIL_COND_V(p_data["body_region_cells"].get_type() != Variant::INT, false);
+		new_region_cells = p_data["body_region_cells"];
+		ERR_FAIL_COND_V_MSG(new_region_cells < 1, false, "A merged body's regions need at least one cell a side.");
+		new_region_size = Vector3i((new_size.x + new_region_cells - 1) / new_region_cells, (new_size.y + new_region_cells - 1) / new_region_cells,
+				(new_size.z + new_region_cells - 1) / new_region_cells);
+		Box3DVoxelGridData parsing;
+		parsing.cell_size = new_cell_size;
+		parsing.body_region_cells = new_region_cells;
+		if (!parsing.parse_regions(p_data, new_region_size.x * new_region_size.y * new_region_size.z, new_region_boxes, new_region_covered)) {
+			return false;
 		}
 	}
-	body_boxes = to_vector<PackedFloat32Array, float>(merged);
-	body_covered_faces = to_vector<PackedByteArray, uint8_t>(covered);
+	body_region_cells = new_region_cells;
+	body_region_size = new_region_size;
+	region_boxes = std::move(new_region_boxes);
+	region_covered_faces = std::move(new_region_covered);
+	changed_regions.clear();
 	cell_size = new_cell_size;
 	cell_voxels = new_cell_voxels;
 	size = new_size;
@@ -81,7 +86,6 @@ bool Box3DVoxelGridData::set(const Dictionary& p_data) {
 bool Box3DVoxelGridData::update(const Dictionary& p_update, std::vector<int32_t>& r_changed_cells) {
 	r_changed_cells.clear();
 	ERR_FAIL_COND_V_MSG(!valid, false, "A voxel grid shape's cells can only be updated once it has a grid.");
-	ERR_FAIL_COND_V_MSG(!body_boxes.empty(), false, "A merged body replaces its complete voxel snapshot, not individual world cells.");
 	ERR_FAIL_COND_V(p_update.get("update", Variant()).get_type() != Variant::PACKED_INT32_ARRAY, false);
 	ERR_FAIL_COND_V(p_update.get("box_offsets", Variant()).get_type() != Variant::PACKED_INT32_ARRAY, false);
 	ERR_FAIL_COND_V(p_update.get("boxes", Variant()).get_type() != Variant::PACKED_FLOAT32_ARRAY, false);
@@ -101,6 +105,22 @@ bool Box3DVoxelGridData::update(const Dictionary& p_update, std::vector<int32_t>
 		ERR_FAIL_COND_V_MSG(pairs[p + 1] < -1 || pairs[p + 1] >= had + added, false, "A voxel grid shape update names a module the shape does not have.");
 	}
 
+	std::vector<int32_t> regions;
+	std::vector<std::vector<float>> replaced_boxes;
+	std::vector<std::vector<uint8_t>> replaced_covered;
+	if (p_update.has("body_regions")) {
+		ERR_FAIL_COND_V_MSG(!is_merged_body(), false, "Only a merged body's grid has regions to replace.");
+		ERR_FAIL_COND_V(p_update["body_regions"].get_type() != Variant::PACKED_INT32_ARRAY, false);
+		const PackedInt32Array named = p_update["body_regions"];
+		for (int64_t r = 0; r < named.size(); r++) {
+			ERR_FAIL_COND_V_MSG(named[r] < 0 || named[r] >= get_body_region_count(), false, "A merged body's update names a region it does not have.");
+			regions.push_back(named[r]);
+		}
+		if (!parse_regions(p_update, (int)regions.size(), replaced_boxes, replaced_covered)) {
+			return false;
+		}
+	}
+
 	const int32_t base = box_offsets[had];
 	for (int m = 1; m <= added; m++) {
 		box_offsets.push_back(base + added_offsets[m]);
@@ -117,6 +137,41 @@ bool Box3DVoxelGridData::update(const Dictionary& p_update, std::vector<int32_t>
 	}
 	std::sort(r_changed_cells.begin(), r_changed_cells.end());
 	r_changed_cells.erase(std::unique(r_changed_cells.begin(), r_changed_cells.end()), r_changed_cells.end());
+	changed_regions = regions;
+	for (size_t r = 0; r < regions.size(); r++) {
+		region_boxes[(size_t)regions[r]] = std::move(replaced_boxes[r]);
+		region_covered_faces[(size_t)regions[r]] = std::move(replaced_covered[r]);
+	}
+	return true;
+}
+
+bool Box3DVoxelGridData::parse_regions(const Dictionary& p_data, int p_region_count, std::vector<std::vector<float>>& r_boxes,
+		std::vector<std::vector<uint8_t>>& r_covered) const {
+	ERR_FAIL_COND_V(p_data.get("body_region_offsets", Variant()).get_type() != Variant::PACKED_INT32_ARRAY, false);
+	ERR_FAIL_COND_V(p_data.get("body_region_boxes", Variant()).get_type() != Variant::PACKED_FLOAT32_ARRAY, false);
+	ERR_FAIL_COND_V(p_data.get("body_region_covered_faces", Variant()).get_type() != Variant::PACKED_BYTE_ARRAY, false);
+	const PackedInt32Array offsets = p_data["body_region_offsets"];
+	const PackedFloat32Array boxes_in = p_data["body_region_boxes"];
+	const PackedByteArray covered = p_data["body_region_covered_faces"];
+	ERR_FAIL_COND_V_MSG(offsets.size() != (int64_t)p_region_count + 1 || offsets[0] != 0 || (int64_t)offsets[p_region_count] * 6 != boxes_in.size()
+					|| covered.size() != boxes_in.size() / 6,
+			false, "A merged body's region offsets must start at 0, give one offset a region and end at the box count, with a cover mask a box.");
+	const float extent = get_body_region_meters() + 0.001f;
+	r_boxes.assign((size_t)p_region_count, {});
+	r_covered.assign((size_t)p_region_count, {});
+	for (int r = 0; r < p_region_count; r++) {
+		ERR_FAIL_COND_V_MSG(offsets[r + 1] < offsets[r], false, "A merged body's region offsets must not decrease.");
+		for (int32_t b = offsets[r]; b < offsets[r + 1]; b++) {
+			for (int a = 0; a < 3; a++) {
+				const float low = boxes_in[(int64_t)b * 6 + a], high = boxes_in[(int64_t)b * 6 + 3 + a];
+				ERR_FAIL_COND_V_MSG(!std::isfinite(low) || !std::isfinite(high) || low < -0.001f || high > extent || high <= low, false,
+						"A merged body's region box must lie in its region.");
+			}
+			ERR_FAIL_COND_V(covered[b] > 63, false);
+		}
+		r_boxes[(size_t)r].assign(boxes_in.ptr() + (int64_t)offsets[r] * 6, boxes_in.ptr() + (int64_t)offsets[r + 1] * 6);
+		r_covered[(size_t)r].assign(covered.ptr() + offsets[r], covered.ptr() + offsets[r + 1]);
+	}
 	return true;
 }
 
@@ -147,15 +202,24 @@ Dictionary Box3DVoxelGridData::to_dictionary() const {
 	data["cells"] = cells;
 	data["box_offsets"] = offsets;
 	data["boxes"] = box_array;
-	if (!body_boxes.empty()) {
-		PackedFloat32Array merged;
-		merged.resize((int64_t)body_boxes.size());
-		memcpy(merged.ptrw(), body_boxes.data(), body_boxes.size() * sizeof(float));
-		PackedByteArray covered;
-		covered.resize((int64_t)body_covered_faces.size());
-		memcpy(covered.ptrw(), body_covered_faces.data(), body_covered_faces.size());
-		data["body_boxes"] = merged;
-		data["body_covered_faces"] = covered;
+	if (is_merged_body()) {
+		PackedInt32Array region_offsets;
+		PackedFloat32Array region_box_array;
+		PackedByteArray region_covered;
+		region_offsets.push_back(0);
+		for (size_t r = 0; r < region_boxes.size(); r++) {
+			for (float value : region_boxes[r]) {
+				region_box_array.push_back(value);
+			}
+			for (uint8_t mask : region_covered_faces[r]) {
+				region_covered.push_back(mask);
+			}
+			region_offsets.push_back((int32_t)(region_box_array.size() / 6));
+		}
+		data["body_region_cells"] = body_region_cells;
+		data["body_region_offsets"] = region_offsets;
+		data["body_region_boxes"] = region_box_array;
+		data["body_region_covered_faces"] = region_covered;
 	}
 	return data;
 }

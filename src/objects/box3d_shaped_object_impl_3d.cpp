@@ -594,32 +594,53 @@ b3ShapeId Box3DShapedObjectImpl3D::_create_grid_shape(Box3DShapeInstance3D& p_in
 	b3VoxelGrid* b3_grid = b3CreateVoxelGrid(&grid_def);
 	release_modules();
 	ERR_FAIL_NULL_V_MSG(b3_grid, b3_nullShapeId, "Box3D: could not create the voxel grid.");
-	if (!data.get_body_boxes().empty()) {
-		// One geometry page spans the whole body; contacts still read its exact occupancy grid.
-		const auto& boxes = data.get_body_boxes();
-		const int count = (int)boxes.size() / 6;
-		const float extent = data.get_cell_size() * std::max(size.x, std::max(size.y, size.z));
-		b3VoxelGridModule* merged = b3CreateVoxelGridModule(boxes.data(), count, extent, cell_voxels);
-		if (merged == nullptr) {
-			b3ReleaseVoxelGrid(b3_grid);
-			ERR_FAIL_V_MSG(b3_nullShapeId, "Box3D: invalid merged body boxes.");
+	if (data.is_merged_body()) {
+		// The body's merged boxes in regions, one module a region (D755): an edit replaces only its regions' modules in
+		// place, and a contact reads the boxes of the regions it reaches. Contacts still read the exact occupancy grid.
+		const Vector3i regions = data.get_body_region_size();
+		const int region_count = data.get_body_region_count();
+		int region_bits = 0;
+		while ((1 << region_bits) < region_count) {
+			region_bits++;
 		}
-		b3VoxelGridModule_SetCoveredFaces(merged, data.get_body_covered_faces().data(), count);
-		int padded[27];
-		std::fill(padded, padded + 27, -1);
-		padded[13] = 0;
-		b3VoxelGridDef merged_def = {};
-		merged_def.cellCountX = merged_def.cellCountY = merged_def.cellCountZ = 1;
-		merged_def.origin = grid_def.origin;
-		merged_def.cellMeters = extent;
-		merged_def.cellVoxels = cell_voxels;
-		merged_def.maxBoxesPerCell = count;
-		merged_def.modules = &merged;
-		merged_def.moduleCount = 1;
-		merged_def.paddedCells = padded;
-		merged_def.occupancy = b3_grid;
-		b3VoxelGrid* collision = b3CreateVoxelGrid(&merged_def);
-		b3ReleaseVoxelGridModule(merged);
+		std::vector<b3VoxelGridModule*> region_modules;
+		region_modules.reserve((size_t)region_count);
+		bool made = true;
+		for (int r = 0; r < region_count && made; r++) {
+			b3VoxelGridModule* module = _make_region_module(data, r);
+			made = module != nullptr;
+			if (made) {
+				region_modules.push_back(module);
+			}
+		}
+		std::vector<int> padded((size_t)(regions.x + 2) * (regions.y + 2) * (regions.z + 2), -1);
+		for (int j = 0; j < regions.y; j++) {
+			for (int k = 0; k < regions.z; k++) {
+				for (int i = 0; i < regions.x; i++) {
+					padded[(size_t)(((j + 1) * (regions.z + 2) + (k + 1)) * (regions.x + 2) + (i + 1))] = (j * regions.z + k) * regions.x + i;
+				}
+			}
+		}
+		b3VoxelGrid* collision = nullptr;
+		if (made) {
+			b3VoxelGridDef merged_def = {};
+			merged_def.cellCountX = regions.x;
+			merged_def.cellCountY = regions.y;
+			merged_def.cellCountZ = regions.z;
+			merged_def.origin = grid_def.origin;
+			merged_def.cellMeters = data.get_body_region_meters();
+			merged_def.cellVoxels = cell_voxels;
+			// Room for any region's boxes after edits: the box bits the region bits leave.
+			merged_def.maxBoxesPerCell = 1 << std::min(24, 31 - region_bits);
+			merged_def.modules = region_modules.data();
+			merged_def.moduleCount = region_count;
+			merged_def.paddedCells = padded.data();
+			merged_def.occupancy = b3_grid;
+			collision = b3CreateVoxelGrid(&merged_def);
+		}
+		for (b3VoxelGridModule* module : region_modules) {
+			b3ReleaseVoxelGridModule(module);
+		}
 		b3ReleaseVoxelGrid(b3_grid);
 		ERR_FAIL_NULL_V_MSG(collision, b3_nullShapeId, "Box3D: could not create merged body collision.");
 		b3_grid = collision;
@@ -633,6 +654,67 @@ b3ShapeId Box3DShapedObjectImpl3D::_create_grid_shape(Box3DShapeInstance3D& p_in
 		Box3DVoxelGridShapeImpl3D::add_live_shapes(1);
 	}
 	return id;
+}
+
+b3VoxelGridModule* Box3DShapedObjectImpl3D::_make_region_module(const Box3DVoxelGridData& p_data, int p_region) {
+	const std::vector<float>& boxes = p_data.get_region_boxes(p_region);
+	const int count = (int)boxes.size() / 6;
+	b3VoxelGridModule* module = b3CreateVoxelGridModule(count > 0 ? boxes.data() : nullptr, count, p_data.get_body_region_meters(), p_data.get_cell_voxels());
+	ERR_FAIL_NULL_V_MSG(module, nullptr, "Box3D: invalid merged body region boxes.");
+	if (count > 0) {
+		b3VoxelGridModule_SetCoveredFaces(module, p_data.get_region_covered_faces(p_region).data(), count);
+	}
+	return module;
+}
+
+// A merged body's edit in place (D755): the occupancy cells and the replaced regions change on the live shape, which
+// keeps its place in the space. False when it can not (a region outgrew its cell), and the caller re-creates it.
+bool Box3DShapedObjectImpl3D::_update_merged_grid(const Box3DVoxelGridData& p_data, b3ShapeId p_id, const Transform3D& p_local, const std::vector<int32_t>& p_changed_cells) {
+	b3VoxelGrid* grid = b3Shape_GetVoxelGrid(p_id);
+	const b3VoxelGrid* occupancy = b3VoxelGrid_GetOccupancy(grid);
+	if (occupancy == nullptr) {
+		return false;
+	}
+	for (int m = b3VoxelGrid_GetModuleCount(occupancy); m < p_data.get_module_count(); m++) {
+		int box_count = 0;
+		const float* boxes = p_data.get_module_boxes(m, box_count);
+		b3VoxelGridModule* module = Box3DVoxelModuleCache::acquire(boxes, box_count, p_data.get_cell_size(), p_data.get_cell_voxels());
+		const int index = b3Shape_VoxelGridAddOccupancyModule(p_id, module);
+		b3ReleaseVoxelGridModule(module);
+		if (index != m) {
+			return false;
+		}
+	}
+	// The changed cells' bounds in the grid frame bound the boxes that differ, for the contacts and wakes.
+	b3AABB changed = { { FLT_MAX, FLT_MAX, FLT_MAX }, { -FLT_MAX, -FLT_MAX, -FLT_MAX } };
+	const b3Vec3 origin = godot_to_b3(p_data.get_origin() + p_local.origin);
+	const float cell = p_data.get_cell_size();
+	std::vector<int> cells;
+	std::vector<int> cell_modules;
+	for (const int32_t padded : p_changed_cells) {
+		cells.push_back(padded);
+		cell_modules.push_back(p_data.get_module_at(padded));
+		int i, j, k;
+		p_data.get_padded_coordinates(padded, i, j, k);
+		const b3Vec3 lower = { origin.x + i * cell, origin.y + j * cell, origin.z + k * cell };
+		changed.lowerBound = b3Min(changed.lowerBound, lower);
+		changed.upperBound = b3Max(changed.upperBound, b3Vec3{ lower.x + cell, lower.y + cell, lower.z + cell });
+	}
+	if (!cells.empty()) {
+		b3Shape_VoxelGridSetOccupancyCells(p_id, cells.data(), cell_modules.data(), (int)cells.size());
+	}
+	for (const int32_t region : p_data.get_changed_regions()) {
+		b3VoxelGridModule* module = _make_region_module(p_data, region);
+		if (module == nullptr) {
+			return false;
+		}
+		const bool replaced = b3Shape_VoxelGridReplaceModule(p_id, region, module, changed);
+		b3ReleaseVoxelGridModule(module);
+		if (!replaced) {
+			return false;
+		}
+	}
+	return true;
 }
 
 void Box3DShapedObjectImpl3D::update_voxel_grid(const Box3DVoxelGridShapeImpl3D* p_grid, const std::vector<int32_t>* p_changed_cells) {
@@ -654,10 +736,21 @@ void Box3DShapedObjectImpl3D::update_voxel_grid(const Box3DVoxelGridShapeImpl3D*
 			continue;
 		}
 
+		const b3ShapeId id = instance.get_shape_id();
+		if (data.is_merged_body()) {
+			if (!_update_merged_grid(data, id, instance.get_transform(), *p_changed_cells)) {
+				_destroy_shape_instance(instance);
+				_create_shape_instance(instance);
+				recreated = true;
+				continue;
+			}
+			edited = true;
+			continue;
+		}
+
 		// Cells change in place: the shape keeps its place in the space, its contacts refresh and the bodies
 		// near a changed cell wake. Modules the update appended join the grid's table first, in order, so
 		// a module's index is the same in the data and in the shape.
-		const b3ShapeId id = instance.get_shape_id();
 		bool in_place = true;
 		for (int m = b3VoxelGrid_GetModuleCount(b3Shape_GetVoxelGrid(id)); m < data.get_module_count(); m++) {
 			int box_count = 0;

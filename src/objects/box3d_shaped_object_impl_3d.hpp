@@ -127,6 +127,8 @@ private:
 	// A voxel grid attachment is one b3 voxel grid shape holding every collidable cell, on a static, kinematic or
 	// rigid body. Returns a null id when the grid has no data yet (set_data attaches it then) or cannot be built.
 	b3ShapeId _create_grid_shape(Box3DShapeInstance3D& p_instance, bool p_is_static);
+	static struct b3VoxelGridModule* _make_region_module(const class Box3DVoxelGridData& p_data, int p_region);
+	bool _update_merged_grid(const class Box3DVoxelGridData& p_data, b3ShapeId p_id, const Transform3D& p_local, const std::vector<int32_t>& p_changed_cells);
 
 	static bool _is_grid_instance(const Box3DShapeInstance3D& p_instance);
 

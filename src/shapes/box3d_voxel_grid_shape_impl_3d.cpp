@@ -26,7 +26,7 @@ void Box3DVoxelGridShapeImpl3D::set_data(const Variant& p_data) {
 	}
 	if (dictionary.has("update")) {
 		std::vector<int32_t> changed_cells;
-		if (!data.update(dictionary, changed_cells) || changed_cells.empty()) {
+		if (!data.update(dictionary, changed_cells) || (changed_cells.empty() && data.get_changed_regions().empty())) {
 			return;
 		}
 		for (Box3DShapedObjectImpl3D* owner : attached) {
