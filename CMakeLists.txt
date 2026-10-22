@@ -43,6 +43,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 	target_compile_options(godot-box3d PRIVATE -Wall)
 endif()
 
+# move_actors answers as the game's C# motor does bit for bit (RyuJIT never fuses a multiply and an add), so no
+# compiler may contract them into FMA here either (MSVC's /fp:precise does not contract since Visual Studio 2022).
+if(MSVC)
+	target_compile_options(godot-box3d PRIVATE /fp:precise)
+else()
+	target_compile_options(godot-box3d PRIVATE -ffp-contract=off)
+endif()
+
 # godot-cpp defines this for MSVC on its own target, which ExternalProject does not propagate; ClassDB::bind_method
 # needs it there (MSVC member pointers differ in size per class).
 if(MSVC)

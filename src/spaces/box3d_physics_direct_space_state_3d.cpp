@@ -542,7 +542,7 @@ namespace {
 constexpr int32_t MOVER_MAX_PLANES = 64;
 constexpr int32_t MOVER_PLANE_STRIDE = 8;
 // move_actors' layouts (its contract is at the method).
-constexpr int32_t MOVER_REQUEST_STRIDE = 20;
+constexpr int32_t MOVER_REQUEST_STRIDE = 24;
 constexpr int32_t MOVER_RESULT_STRIDE = 16;
 
 // The mover queries filter like test_body_motion: the body's mask, minus the body and its collision exceptions.
@@ -825,27 +825,27 @@ Vector3 move(const Batch& p_batch, Actor& r_actor, const Vector3& p_origin, cons
 	return position;
 }
 
-Vector3 support_normal(const Actor& p_actor) {
+Vector3 support_normal(const Actor& p_actor, const Vector3& p_up) {
 	Vector3 sum;
 	for (int32_t i = 0; i < p_actor.count; i++) {
-		if (-p_actor.planes[i].offset <= TOUCHING && p_actor.planes[i].normal.dot(UP) > 0) {
+		if (-p_actor.planes[i].offset <= TOUCHING && p_actor.planes[i].normal.dot(p_up) > 0) {
 			sum += p_actor.planes[i].normal;
 		}
 	}
 	return sum.length_squared() > 1e-8f ? sum.normalized() : Vector3();
 }
 
-void classify(Actor& r_actor, float p_floor_cos, const Vector3& p_motion) {
+void classify(Actor& r_actor, const Vector3& p_up, float p_floor_cos, const Vector3& p_motion) {
 	r_actor.on_floor = r_actor.on_wall = r_actor.on_ceiling = false;
 	Vector3 floor;
 	float against = FLT_MAX;
-	const Vector3 direction = (p_motion - UP * p_motion.dot(UP)).normalized();
+	const Vector3 direction = (p_motion - p_up * p_motion.dot(p_up)).normalized();
 	for (int32_t i = 0; i < r_actor.count; i++) {
 		const Plane& plane = r_actor.planes[i];
 		if (-plane.offset > TOUCHING) {
 			continue;
 		}
-		const float rise = plane.normal.dot(UP);
+		const float rise = plane.normal.dot(p_up);
 		if (rise >= p_floor_cos) {
 			r_actor.on_floor = true;
 			floor += plane.normal;
@@ -861,13 +861,13 @@ void classify(Actor& r_actor, float p_floor_cos, const Vector3& p_motion) {
 		}
 	}
 	if (!r_actor.on_floor) {
-		const Vector3 support = support_normal(r_actor);
-		if (support.dot(UP) >= p_floor_cos) {
+		const Vector3 support = support_normal(r_actor, p_up);
+		if (support.dot(p_up) >= p_floor_cos) {
 			r_actor.on_floor = true;
 			floor = support;
 		}
 	}
-	r_actor.floor_normal = r_actor.on_floor ? floor.normalized() : UP;
+	r_actor.floor_normal = r_actor.on_floor ? floor.normalized() : p_up;
 }
 
 void move_actor(void* p_batch, uint32_t p_index) {
@@ -882,6 +882,7 @@ void move_actor(void* p_batch, uint32_t p_index) {
 	const int32_t flags = (int32_t)in[14];
 	const bool was_on_floor = (flags & 1) != 0, snap = (flags & 2) != 0;
 	actor.wall_normal = Vector3(in[15], in[16], in[17]);
+	const Vector3 up(in[18], in[19], in[20]);
 	actor.on_floor = was_on_floor;
 
 	const float block_cos = was_on_floor ? floor_cos : 2;
@@ -892,19 +893,19 @@ void move_actor(void* p_batch, uint32_t p_index) {
 	Vector3 position = move(batch, actor, start, shape_offset, height, radius, motion, block_cos);
 	Vector3 velocity = clip(actor, desired);
 	collide(batch, actor, position, shape_offset, height, radius);
-	classify(actor, floor_cos, desired);
+	classify(actor, up, floor_cos, desired);
 	if (snap && was_on_floor && !actor.on_floor && snap_length > 0) {
 		const Vector3 down = DOWN * snap_length;
 		const float fraction = cast(batch, actor, position, shape_offset, height, radius, down);
 		if (fraction < 1) {
 			const Vector3 snapped = position + down * fraction;
 			collide(batch, actor, snapped, shape_offset, height, radius);
-			classify(actor, floor_cos, desired);
+			classify(actor, up, floor_cos, desired);
 			if (actor.on_floor) {
 				position = snapped;
 			} else {
 				collide(batch, actor, position, shape_offset, height, radius);
-				classify(actor, floor_cos, desired);
+				classify(actor, up, floor_cos, desired);
 			}
 		}
 	}
@@ -938,7 +939,8 @@ void move_actor(void* p_batch, uint32_t p_index) {
 // Moves every actor for one tick (docs/89 row 3): bodies one RID per actor, requests MOVER_REQUEST_STRIDE floats per
 // actor (start xyz, the capsule shape's offset xyz, height, radius, desired velocity xyz, the tick's seconds, the cosine
 // of the floor angle, the floor snap length, flags (1 on a floor before the move, 2 snap to the floor), the wall normal
-// before the move xyz, two unused), workers the most threads the moves share (1 on the calling thread; 0 as many as
+// before the move xyz, the body's up direction xyz (floor, wall and ceiling are read against it, as CapsuleMover.Classify
+// reads them), three unused), workers the most threads the moves share (1 on the calling thread; 0 as many as
 // the pool gives). Returns [results, planes, plane_starts]: MOVER_RESULT_STRIDE floats per actor (position xyz,
 // velocity xyz, flags (1 floor, 2 wall, 4 ceiling), floor normal xyz, wall normal xyz, most solver rounds, plane
 // count, unused), the planes the body touches where it stops (collide_mover's layout, the offset less the touching
@@ -962,10 +964,11 @@ Array Box3DPhysicsDirectSpaceState3D::move_actors(const Array& p_bodies, const P
 	PackedFloat32Array results;
 	results.resize(count * MOVER_RESULT_STRIDE);
 	for (int64_t i = 0; i < count; i++) {
-		mover_actors[i].filter = Box3DQueryFilter3D();
-		if (!make_mover_filter(this, p_bodies[i], mover_actors[i].filter)) {
-			return answer;
-		}
+		// The filter is refilled in place: its exclusions keep their storage from the last call.
+		Box3DQueryFilter3D& filter = mover_actors[i].filter;
+		filter.exclude.clear();
+		ERR_FAIL_COND_V_MSG(!make_mover_filter(this, p_bodies[i], filter), answer,
+				vformat("Box3D move_actors: body %d of %d is not a physics body.", i, count));
 	}
 
 	mover::Batch batch;
