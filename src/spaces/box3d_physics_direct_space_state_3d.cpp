@@ -24,6 +24,11 @@
 #include <godot_cpp/core/object.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/templates/local_vector.hpp>
+#include <godot_cpp/classes/worker_thread_pool.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <vector>
 
 namespace {
 
@@ -536,6 +541,9 @@ namespace {
 
 constexpr int32_t MOVER_MAX_PLANES = 64;
 constexpr int32_t MOVER_PLANE_STRIDE = 8;
+// move_actors' layouts (its contract is at the method).
+constexpr int32_t MOVER_REQUEST_STRIDE = 20;
+constexpr int32_t MOVER_RESULT_STRIDE = 16;
 
 // The mover queries filter like test_body_motion: the body's mask, minus the body and its collision exceptions.
 bool make_mover_filter(const Box3DPhysicsDirectSpaceState3D* p_state, const RID& p_body, Box3DQueryFilter3D& r_filter) {
@@ -562,7 +570,7 @@ bool mover_accepts(b3ShapeId p_shape_id, const Box3DQueryFilter3D& p_filter) {
 struct CollideMoverContext {
 	const Box3DQueryFilter3D* filter = nullptr;
 	b3Vec3 origin = b3Vec3_zero;
-	PackedFloat32Array* planes = nullptr;
+	float* planes = nullptr;
 	int32_t count = 0;
 };
 
@@ -576,7 +584,7 @@ bool collide_mover_result_fcn(b3ShapeId p_shape_id, const b3PlaneResult* p_plane
 	for (int i = 0; i < p_plane_count && ctx->count < MOVER_MAX_PLANES; i++) {
 		const b3PlaneResult& result = p_planes[i];
 		const b3Vec3 point = b3Add(ctx->origin, result.point);
-		float* out = ctx->planes->ptrw() + ctx->count * MOVER_PLANE_STRIDE;
+		float* out = ctx->planes + ctx->count * MOVER_PLANE_STRIDE;
 		out[0] = result.plane.normal.x;
 		out[1] = result.plane.normal.y;
 		out[2] = result.plane.normal.z;
@@ -594,11 +602,41 @@ bool cast_mover_filter_fcn(b3ShapeId p_shape_id, void* p_context) {
 	return mover_accepts(p_shape_id, *static_cast<const Box3DQueryFilter3D*>(p_context));
 }
 
+// The capsule goes to Box3D relative to its midpoint to keep the coordinates small.
+b3Capsule mover_capsule(const Vector3& p_center1, const Vector3& p_center2, float p_radius, b3Vec3& r_origin) {
+	const b3Vec3 center1 = godot_to_b3(p_center1);
+	const b3Vec3 center2 = godot_to_b3(p_center2);
+	r_origin = b3MulSV(0.5f, b3Add(center1, center2));
+	return { b3Sub(center1, r_origin), b3Sub(center2, r_origin), p_radius };
+}
+
+// collide_mover's planes into r_planes (room for MOVER_MAX_PLANES), their count returned.
+int32_t collide_mover_into(b3WorldId p_world, const Box3DQueryFilter3D& p_filter, const Vector3& p_center1, const Vector3& p_center2,
+		float p_radius, float* r_planes) {
+	b3Vec3 origin;
+	const b3Capsule mover = mover_capsule(p_center1, p_center2, p_radius, origin);
+	CollideMoverContext context;
+	context.filter = &p_filter;
+	context.origin = origin;
+	context.planes = r_planes;
+	b3World_CollideMover(p_world, origin, &mover, p_filter.filter, collide_mover_result_fcn, &context);
+	return context.count;
+}
+
+float cast_mover_with(b3WorldId p_world, const Box3DQueryFilter3D& p_filter, const Vector3& p_center1, const Vector3& p_center2,
+		float p_radius, const Vector3& p_translation) {
+	b3Vec3 origin;
+	const b3Capsule mover = mover_capsule(p_center1, p_center2, p_radius, origin);
+	return b3World_CastMover(p_world, origin, &mover, godot_to_b3(p_translation), p_filter.filter, cast_mover_filter_fcn,
+			const_cast<Box3DQueryFilter3D*>(&p_filter));
+}
+
 } // namespace
 
 void Box3DPhysicsDirectSpaceState3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("collide_mover", "body", "center1", "center2", "radius"), &Box3DPhysicsDirectSpaceState3D::collide_mover);
 	ClassDB::bind_method(D_METHOD("cast_mover", "body", "center1", "center2", "radius", "translation"), &Box3DPhysicsDirectSpaceState3D::cast_mover);
+	ClassDB::bind_method(D_METHOD("move_actors", "bodies", "requests", "workers"), &Box3DPhysicsDirectSpaceState3D::move_actors);
 	ClassDB::bind_method(D_METHOD("box3d_byte_count"), &Box3DPhysicsDirectSpaceState3D::box3d_byte_count);
 	ClassDB::bind_method(D_METHOD("world_counters"), &Box3DPhysicsDirectSpaceState3D::world_counters);
 	ClassDB::bind_method(D_METHOD("prepare_voxel_modules", "boxes", "box_offsets", "cell_meters", "cell_voxels"), &Box3DPhysicsDirectSpaceState3D::prepare_voxel_modules);
@@ -621,19 +659,9 @@ PackedFloat32Array Box3DPhysicsDirectSpaceState3D::collide_mover(
 	if (!make_mover_filter(this, p_body, filter)) {
 		return planes;
 	}
-
-	const b3Vec3 center1 = godot_to_b3(p_center1);
-	const b3Vec3 center2 = godot_to_b3(p_center2);
-	const b3Vec3 origin = b3MulSV(0.5f, b3Add(center1, center2));
-	const b3Capsule mover = { b3Sub(center1, origin), b3Sub(center2, origin), p_radius };
-
 	planes.resize(MOVER_MAX_PLANES * MOVER_PLANE_STRIDE);
-	CollideMoverContext context;
-	context.filter = &filter;
-	context.origin = origin;
-	context.planes = &planes;
-	b3World_CollideMover(space->get_world_id(), origin, &mover, filter.filter, collide_mover_result_fcn, &context);
-	planes.resize(context.count * MOVER_PLANE_STRIDE);
+	const int32_t count = collide_mover_into(space->get_world_id(), filter, p_center1, p_center2, p_radius, planes.ptrw());
+	planes.resize(count * MOVER_PLANE_STRIDE);
 	return planes;
 }
 
@@ -645,13 +673,338 @@ float Box3DPhysicsDirectSpaceState3D::cast_mover(
 	if (!make_mover_filter(this, p_body, filter)) {
 		return 1.0f;
 	}
+	return cast_mover_with(space->get_world_id(), filter, p_center1, p_center2, p_radius, p_translation);
+}
 
-	const b3Vec3 center1 = godot_to_b3(p_center1);
-	const b3Vec3 center2 = godot_to_b3(p_center2);
-	const b3Vec3 origin = b3MulSV(0.5f, b3Add(center1, center2));
-	const b3Capsule mover = { b3Sub(center1, origin), b3Sub(center2, origin), p_radius };
-	return b3World_CastMover(
-			space->get_world_id(), origin, &mover, godot_to_b3(p_translation), filter.filter, cast_mover_filter_fcn, &filter);
+namespace {
+
+// The batched actor mover (Terra's crowd prototype, docs/89 row 3, D817): every actor's move for one tick, each
+// exactly as the game's C# motor makes it (TerraPrime's ActorMotor.Move over CapsuleMover: Box3D's samples/mover.cpp
+// plane mover, MIT, Erin Catto), the same float operations in the same order, so the answers match the C# path bit
+// for bit. Each actor moves against the world as it stands when the call begins (the other actors' start-of-tick
+// poses, D817): the call moves no body, every query only reads the world, and each actor's answer lands in its own
+// slot, so it is the same on any number of workers. The plugin never records a Box3D world (b3World's recording
+// writer is not safe for parallel queries).
+namespace mover {
+
+constexpr int32_t ITERATIONS = 5;
+constexpr float SLOP = 0.005f;
+constexpr float CLEARANCE = 0.001f;
+constexpr float FLOOR_RISE = 0.7f;
+constexpr float TOUCHING = 4 * SLOP;
+constexpr float TOLERANCE = 0.001f;
+const Vector3 UP(0, 1, 0);
+const Vector3 DOWN(0, -1, 0);
+
+struct Plane {
+	Vector3 normal, solving, point;
+	float offset = 0, push = 0;
+	int32_t mode = 0;
+};
+
+// One actor's scratch: its query filter, the planes last collided and those the last move's solve pushed on.
+struct Actor {
+	Box3DQueryFilter3D filter;
+	Plane planes[MOVER_MAX_PLANES];
+	int32_t count = 0;
+	Vector3 pushed[MOVER_MAX_PLANES];
+	int32_t pushed_count = 0;
+	int32_t iterated = 0;
+	bool on_floor = false, on_wall = false, on_ceiling = false;
+	Vector3 floor_normal = UP, wall_normal;
+};
+
+struct Batch {
+	b3WorldId world;
+	const float* requests = nullptr;
+	float* results = nullptr;
+	float* planes = nullptr;
+	Actor* actors = nullptr;
+};
+
+void centres(const Vector3& p_origin, const Vector3& p_shape_offset, float p_height, float p_radius, Vector3& r_low, Vector3& r_high) {
+	const Vector3 centre = p_origin + p_shape_offset + DOWN * SLOP;
+	const float half = std::max(0.0f, p_height / 2 - p_radius);
+	r_low = centre + DOWN * half;
+	r_high = centre + UP * half;
+}
+
+void collide(const Batch& p_batch, Actor& r_actor, const Vector3& p_origin, const Vector3& p_shape_offset, float p_height, float p_radius) {
+	Vector3 low, high;
+	centres(p_origin, p_shape_offset, p_height, p_radius, low, high);
+	float data[MOVER_MAX_PLANES * MOVER_PLANE_STRIDE];
+	r_actor.count = collide_mover_into(p_batch.world, r_actor.filter, low, high, p_radius + TOUCHING, data);
+	for (int32_t i = 0; i < r_actor.count; i++) {
+		const float* at = data + i * MOVER_PLANE_STRIDE;
+		Plane& plane = r_actor.planes[i];
+		plane.normal = Vector3(at[0], at[1], at[2]);
+		plane.offset = at[3] - TOUCHING;
+		plane.point = Vector3(at[4], at[5], at[6]);
+		plane.mode = (int32_t)at[7];
+		plane.solving = Vector3();
+		plane.push = 0;
+	}
+}
+
+float cast(const Batch& p_batch, const Actor& p_actor, const Vector3& p_origin, const Vector3& p_shape_offset, float p_height, float p_radius,
+		const Vector3& p_motion) {
+	if (p_motion.length_squared() < 1e-12f) {
+		return 1;
+	}
+	Vector3 low, high;
+	centres(p_origin, p_shape_offset, p_height, p_radius, low, high);
+	const float fraction = cast_mover_with(p_batch.world, p_actor.filter, low, high, p_radius, p_motion);
+	return fraction >= 1 ? 1 : std::max(0.0f, fraction - CLEARANCE / p_motion.length());
+}
+
+Vector3 solve(Actor& r_actor, Vector3 p_delta, float p_block_cos) {
+	for (int32_t i = 0; i < r_actor.count; i++) {
+		Plane& plane = r_actor.planes[i];
+		const float rise = plane.normal.y;
+		const Vector3 across(plane.normal.x, 0, plane.normal.z);
+		plane.solving = rise > 0 && rise < p_block_cos && across.length_squared() > 1e-6f ? across.normalized() : plane.normal;
+	}
+	for (int32_t i = 0; i < r_actor.count; i++) {
+		r_actor.planes[i].push = 0;
+	}
+	int32_t iteration;
+	for (iteration = 0; iteration < 20; iteration++) {
+		float total = 0;
+		for (int32_t i = 0; i < r_actor.count; i++) {
+			Plane& plane = r_actor.planes[i];
+			const float separation = plane.solving.dot(p_delta) - plane.offset + SLOP;
+			const float accumulated = plane.push;
+			plane.push = std::max(0.0f, plane.push - separation);
+			const float push = plane.push - accumulated;
+			p_delta += plane.solving * push;
+			total += std::abs(push);
+		}
+		if (total < SLOP) {
+			break;
+		}
+	}
+	r_actor.iterated = std::max(r_actor.iterated, iteration);
+	return p_delta;
+}
+
+Vector3 clip(const Actor& p_actor, Vector3 p_velocity) {
+	for (int32_t i = 0; i < p_actor.pushed_count; i++) {
+		p_velocity -= p_actor.pushed[i] * std::min(0.0f, p_velocity.dot(p_actor.pushed[i]));
+	}
+	return p_velocity;
+}
+
+Vector3 move(const Batch& p_batch, Actor& r_actor, const Vector3& p_origin, const Vector3& p_shape_offset, float p_height, float p_radius,
+		const Vector3& p_motion, float p_block_cos) {
+	r_actor.iterated = 0;
+	Vector3 position = p_origin;
+	const Vector3 target = p_origin + p_motion;
+	for (int32_t iteration = 0; iteration < ITERATIONS; iteration++) {
+		collide(p_batch, r_actor, position, p_shape_offset, p_height, p_radius);
+		Vector3 delta = solve(r_actor, target - position, p_block_cos);
+		delta *= cast(p_batch, r_actor, position, p_shape_offset, p_height, p_radius, delta);
+		position += delta;
+		if (delta.length_squared() < TOLERANCE * TOLERANCE) {
+			break;
+		}
+	}
+	r_actor.pushed_count = 0;
+	for (int32_t i = 0; i < r_actor.count; i++) {
+		if (r_actor.planes[i].push > 0) {
+			r_actor.pushed[r_actor.pushed_count++] = r_actor.planes[i].solving;
+		}
+	}
+	// Out of walls and ceilings the body steps back to the clearance; floors keep the solver's slop.
+	collide(p_batch, r_actor, position, p_shape_offset, p_height, p_radius);
+	for (int32_t i = 0; i < r_actor.count; i++) {
+		const float separation = -r_actor.planes[i].offset;
+		if (r_actor.planes[i].normal.y < FLOOR_RISE && separation < CLEARANCE && separation > -4 * SLOP) {
+			position += r_actor.planes[i].normal * (CLEARANCE - separation);
+		}
+	}
+	return position;
+}
+
+Vector3 support_normal(const Actor& p_actor) {
+	Vector3 sum;
+	for (int32_t i = 0; i < p_actor.count; i++) {
+		if (-p_actor.planes[i].offset <= TOUCHING && p_actor.planes[i].normal.dot(UP) > 0) {
+			sum += p_actor.planes[i].normal;
+		}
+	}
+	return sum.length_squared() > 1e-8f ? sum.normalized() : Vector3();
+}
+
+void classify(Actor& r_actor, float p_floor_cos, const Vector3& p_motion) {
+	r_actor.on_floor = r_actor.on_wall = r_actor.on_ceiling = false;
+	Vector3 floor;
+	float against = FLT_MAX;
+	const Vector3 direction = (p_motion - UP * p_motion.dot(UP)).normalized();
+	for (int32_t i = 0; i < r_actor.count; i++) {
+		const Plane& plane = r_actor.planes[i];
+		if (-plane.offset > TOUCHING) {
+			continue;
+		}
+		const float rise = plane.normal.dot(UP);
+		if (rise >= p_floor_cos) {
+			r_actor.on_floor = true;
+			floor += plane.normal;
+		} else if (rise <= -p_floor_cos) {
+			r_actor.on_ceiling = true;
+		} else {
+			r_actor.on_wall = true;
+			const float facing = direction.is_finite() ? plane.normal.dot(direction) : 0;
+			if (facing < against) {
+				against = facing;
+				r_actor.wall_normal = plane.normal;
+			}
+		}
+	}
+	if (!r_actor.on_floor) {
+		const Vector3 support = support_normal(r_actor);
+		if (support.dot(UP) >= p_floor_cos) {
+			r_actor.on_floor = true;
+			floor = support;
+		}
+	}
+	r_actor.floor_normal = r_actor.on_floor ? floor.normalized() : UP;
+}
+
+void move_actor(void* p_batch, uint32_t p_index) {
+	const Batch& batch = *static_cast<const Batch*>(p_batch);
+	Actor& actor = batch.actors[p_index];
+	const float* in = batch.requests + (size_t)p_index * MOVER_REQUEST_STRIDE;
+	const Vector3 start(in[0], in[1], in[2]);
+	const Vector3 shape_offset(in[3], in[4], in[5]);
+	const float height = in[6], radius = in[7];
+	const Vector3 desired(in[8], in[9], in[10]);
+	const float delta = in[11], floor_cos = in[12], snap_length = in[13];
+	const int32_t flags = (int32_t)in[14];
+	const bool was_on_floor = (flags & 1) != 0, snap = (flags & 2) != 0;
+	actor.wall_normal = Vector3(in[15], in[16], in[17]);
+	actor.on_floor = was_on_floor;
+
+	const float block_cos = was_on_floor ? floor_cos : 2;
+	Vector3 motion = desired * delta;
+	if (was_on_floor && snap) {
+		motion.y = 0;
+	}
+	Vector3 position = move(batch, actor, start, shape_offset, height, radius, motion, block_cos);
+	Vector3 velocity = clip(actor, desired);
+	collide(batch, actor, position, shape_offset, height, radius);
+	classify(actor, floor_cos, desired);
+	if (snap && was_on_floor && !actor.on_floor && snap_length > 0) {
+		const Vector3 down = DOWN * snap_length;
+		const float fraction = cast(batch, actor, position, shape_offset, height, radius, down);
+		if (fraction < 1) {
+			const Vector3 snapped = position + down * fraction;
+			collide(batch, actor, snapped, shape_offset, height, radius);
+			classify(actor, floor_cos, desired);
+			if (actor.on_floor) {
+				position = snapped;
+			} else {
+				collide(batch, actor, position, shape_offset, height, radius);
+				classify(actor, floor_cos, desired);
+			}
+		}
+	}
+	if (actor.on_floor && velocity.y < 0) {
+		velocity.y = 0;
+	}
+
+	float* out = batch.results + (size_t)p_index * MOVER_RESULT_STRIDE;
+	out[0] = position.x, out[1] = position.y, out[2] = position.z;
+	out[3] = velocity.x, out[4] = velocity.y, out[5] = velocity.z;
+	out[6] = (float)((actor.on_floor ? 1 : 0) | (actor.on_wall ? 2 : 0) | (actor.on_ceiling ? 4 : 0));
+	out[7] = actor.floor_normal.x, out[8] = actor.floor_normal.y, out[9] = actor.floor_normal.z;
+	out[10] = actor.wall_normal.x, out[11] = actor.wall_normal.y, out[12] = actor.wall_normal.z;
+	out[13] = (float)actor.iterated;
+	out[14] = (float)actor.count;
+	out[15] = 0;
+	float* planes = batch.planes + (size_t)p_index * MOVER_MAX_PLANES * MOVER_PLANE_STRIDE;
+	for (int32_t i = 0; i < actor.count; i++) {
+		const Plane& plane = actor.planes[i];
+		float* at = planes + i * MOVER_PLANE_STRIDE;
+		at[0] = plane.normal.x, at[1] = plane.normal.y, at[2] = plane.normal.z;
+		at[3] = plane.offset;
+		at[4] = plane.point.x, at[5] = plane.point.y, at[6] = plane.point.z;
+		at[7] = (float)plane.mode;
+	}
+}
+
+} // namespace mover
+} // namespace
+
+// Moves every actor for one tick (docs/89 row 3): bodies one RID per actor, requests MOVER_REQUEST_STRIDE floats per
+// actor (start xyz, the capsule shape's offset xyz, height, radius, desired velocity xyz, the tick's seconds, the cosine
+// of the floor angle, the floor snap length, flags (1 on a floor before the move, 2 snap to the floor), the wall normal
+// before the move xyz, two unused), workers the most threads the moves share (1 on the calling thread; 0 as many as
+// the pool gives). Returns [results, planes, plane_starts]: MOVER_RESULT_STRIDE floats per actor (position xyz,
+// velocity xyz, flags (1 floor, 2 wall, 4 ceiling), floor normal xyz, wall normal xyz, most solver rounds, plane
+// count, unused), the planes the body touches where it stops (collide_mover's layout, the offset less the touching
+// window as the C# mover keeps it), and where each actor's planes start (one more entry than actors). Main thread,
+// between physics steps; an invalid body fails the whole batch with an empty Array.
+Array Box3DPhysicsDirectSpaceState3D::move_actors(const Array& p_bodies, const PackedFloat32Array& p_requests, int p_workers) {
+	Array answer;
+	ERR_FAIL_NULL_V(space, answer);
+	const int64_t count = p_bodies.size();
+	ERR_FAIL_COND_V_MSG(p_requests.size() != count * MOVER_REQUEST_STRIDE, answer,
+			"Box3D move_actors: requests must hold MOVER_REQUEST_STRIDE floats per body.");
+	ERR_FAIL_COND_V_MSG(p_workers < 0, answer, "Box3D move_actors: workers must be 0 (the pool's) or more.");
+
+	// Scratch kept between calls: the method runs on the main thread only.
+	static std::vector<mover::Actor> mover_actors;
+	static std::vector<float> mover_planes;
+	if ((int64_t)mover_actors.size() < count) {
+		mover_actors.resize(count);
+	}
+	mover_planes.resize(count * MOVER_MAX_PLANES * MOVER_PLANE_STRIDE);
+	PackedFloat32Array results;
+	results.resize(count * MOVER_RESULT_STRIDE);
+	for (int64_t i = 0; i < count; i++) {
+		mover_actors[i].filter = Box3DQueryFilter3D();
+		if (!make_mover_filter(this, p_bodies[i], mover_actors[i].filter)) {
+			return answer;
+		}
+	}
+
+	mover::Batch batch;
+	batch.world = space->get_world_id();
+	batch.requests = p_requests.ptr();
+	batch.results = results.ptrw();
+	batch.planes = mover_planes.data();
+	batch.actors = mover_actors.data();
+	if (p_workers == 1 || count < 2) {
+		for (int64_t i = 0; i < count; i++) {
+			mover::move_actor(&batch, (uint32_t)i);
+		}
+	} else {
+		WorkerThreadPool* pool = WorkerThreadPool::get_singleton();
+		const int tasks = p_workers == 0 ? -1 : (int)std::min<int64_t>(p_workers, count);
+		const WorkerThreadPool::GroupID group = pool->add_native_group_task(&mover::move_actor, &batch, (int)count, tasks, true, "Box3D move_actors");
+		pool->wait_for_group_task_completion(group);
+	}
+
+	PackedInt32Array starts;
+	starts.resize(count + 1);
+	int32_t total = 0;
+	for (int64_t i = 0; i < count; i++) {
+		starts.set(i, total);
+		total += mover_actors[i].count;
+	}
+	starts.set(count, total);
+	PackedFloat32Array planes;
+	planes.resize(total * MOVER_PLANE_STRIDE);
+	float* to = planes.ptrw();
+	for (int64_t i = 0; i < count; i++) {
+		const int32_t floats = mover_actors[i].count * MOVER_PLANE_STRIDE;
+		memcpy(to, mover_planes.data() + i * MOVER_MAX_PLANES * MOVER_PLANE_STRIDE, floats * sizeof(float));
+		to += floats;
+	}
+	answer.append(results);
+	answer.append(planes);
+	answer.append(starts);
+	return answer;
 }
 
 namespace {

@@ -105,6 +105,8 @@ public:
 	// Character mover queries for a script-side capsule controller (bound for Call from C#); layouts are in the .cpp.
 	PackedFloat32Array collide_mover(const RID& p_body, const Vector3& p_center1, const Vector3& p_center2, float p_radius);
 	float cast_mover(const RID& p_body, const Vector3& p_center1, const Vector3& p_center2, float p_radius, const Vector3& p_translation);
+	// Every actor's move for one tick at once (the crowd prototype's batched mover); layouts are in the .cpp.
+	Array move_actors(const Array& p_bodies, const PackedFloat32Array& p_requests, int p_workers);
 	int box3d_byte_count();
 	Dictionary world_counters();
 	void prepare_voxel_modules(const PackedFloat32Array& p_boxes, const PackedInt32Array& p_box_offsets, float p_cell_meters, int p_cell_voxels);
